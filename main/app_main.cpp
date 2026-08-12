@@ -2,11 +2,17 @@
 #include "auth/oauth_callback_server.hpp"
 #include "longbridge/longbridge_client.hpp"
 #include "quotes/quote_store.hpp"
+#include "settings/settings_file.hpp"
 #include "settings/settings_store.hpp"
 #include "ui/terminal_ui.hpp"
 
+#include <atomic>
+#include <array>
+#include <cctype>
+#include <cstdio>
 #include <cstring>
 #include <cstdint>
+#include <cinttypes>
 #include <ctime>
 #include <algorithm>
 #include <map>
@@ -29,11 +35,13 @@
 #include "esp_sntp.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "lvgl.h"
 #include "mdns.h"
 #include "sdkconfig.h"
+#include "driver/gpio.h"
 #include "driver/i2c_master.h"
 
 #if __has_include("bsp/esp-bsp.h")
@@ -66,18 +74,61 @@ namespace {
 constexpr const char* kTag = "tab5-stock";
 constexpr std::int64_t kQuoteStaleAfterMs = 20'000;
 constexpr std::int64_t kLiveSnapshotRefreshMs = 60'000;
+constexpr std::size_t kSdSettingsFileMaxBytes = 32 * 1024;
 constexpr bool kForceSt7123DisplayDiagnostic = false;
 constexpr bool kForceSt7121Display = true;
 constexpr bool kHoldLvglDisplayDiagnostic = false;
 constexpr bool kHoldBspHardwarePatternDiagnostic = false;
 constexpr bool kHoldSt7123DriverPatternDiagnostic = false;
 constexpr bool kHoldSt7121DriverPatternDiagnostic = false;
-constexpr bool kShowSt7123HardwareColorBars = true;
-constexpr bool kShowRawPanelDiagnostic = true;
-constexpr bool kHoldRawPanelDiagnostic = true;
+constexpr bool kShowSt7123HardwareColorBars = false;
+constexpr bool kShowRawPanelDiagnostic = false;
+constexpr bool kHoldRawPanelDiagnostic = false;
+constexpr std::uint8_t kTab5KeyboardAddress = 0x6d;
+constexpr i2c_port_num_t kTab5KeyboardI2CPort = I2C_NUM_1;
+constexpr gpio_num_t kTab5KeyboardSda = GPIO_NUM_0;
+constexpr gpio_num_t kTab5KeyboardScl = GPIO_NUM_1;
+constexpr gpio_num_t kTab5KeyboardInt = GPIO_NUM_50;
+constexpr std::uint32_t kTab5KeyboardI2CFrequencyHz = 400'000;
+constexpr std::uint8_t kTab5KeyboardRegInterruptConfig = 0x00;
+constexpr std::uint8_t kTab5KeyboardRegInterruptStatus = 0x01;
+constexpr std::uint8_t kTab5KeyboardRegEventCount = 0x02;
+constexpr std::uint8_t kTab5KeyboardRegMode = 0x10;
+constexpr std::uint8_t kTab5KeyboardRegKeyEvent = 0x20;
+constexpr std::uint8_t kTab5KeyboardRegHidEvent = 0x30;
+constexpr std::uint8_t kTab5KeyboardRegCharEventLength = 0x40;
+constexpr std::uint8_t kTab5KeyboardRegCharEvent = 0x50;
+constexpr std::uint8_t kTab5KeyboardRegFirmwareVersion = 0xfe;
+constexpr std::uint8_t kTab5KeyboardInterruptKey = 0x01;
+constexpr std::uint8_t kTab5KeyboardInterruptChar = 0x04;
+constexpr std::uint8_t kTab5KeyboardStatusKey = 0x01;
+constexpr std::uint8_t kTab5KeyboardStatusHid = 0x02;
+constexpr std::uint8_t kTab5KeyboardStatusChar = 0x04;
+constexpr std::uint8_t kTab5KeyboardModeKey = 0x00;
+constexpr std::uint8_t kTab5KeyboardModeHid = 0x01;
+constexpr std::uint8_t kTab5KeyboardModeChar = 0x02;
+constexpr std::uint8_t kTab5KeyboardEmptyEvent = 0xff;
+constexpr std::uint8_t kTab5KeyboardMaxEvents = 32;
+constexpr std::size_t kTab5KeyboardCharEventMaxBytes = 17;
+constexpr std::size_t kTab5KeyboardQueueSize = 96;
 constexpr EventBits_t kWifiConnectedBit = BIT0;
 constexpr EventBits_t kWifiFailedBit = BIT1;
 constexpr EventBits_t kHostedTransportUpBit = BIT2;
+
+enum class KeyboardStatus : std::uint8_t {
+    Wait,
+    Ready,
+    Input,
+    Lost,
+};
+
+struct Tab5KeyboardInputContext {
+    QueueHandle_t key_queue { nullptr };
+    std::uint32_t last_key { 0 };
+    bool release_pending { false };
+    std::uint32_t logged_key_count { 0 };
+    std::uint32_t logged_raw_event_count { 0 };
+};
 
 tab5::settings::SettingsStore g_settings_store;
 tab5::settings::AppSettings g_settings;
@@ -101,6 +152,21 @@ bool g_mdns_started { false };
 bool g_hosted_started { false };
 bool g_hosted_event_handler_registered { false };
 lv_display_t* g_display { nullptr };
+i2c_master_bus_handle_t g_tab5_keyboard_bus { nullptr };
+i2c_master_dev_handle_t g_tab5_keyboard_device { nullptr };
+lv_indev_t* g_tab5_keyboard_indev { nullptr };
+QueueHandle_t g_tab5_keyboard_intr_queue { nullptr };
+Tab5KeyboardInputContext g_tab5_keyboard_input;
+bool g_tab5_keyboard_ready { false };
+bool g_tab5_keyboard_absent_logged { false };
+std::uint32_t g_tab5_keyboard_i2c_error_count { 0 };
+std::uint32_t g_tab5_keyboard_poll_count { 0 };
+std::uint32_t g_tab5_keyboard_irq_count { 0 };
+std::int64_t g_tab5_keyboard_last_heartbeat_ms { 0 };
+int g_tab5_keyboard_last_int_level { -1 };
+std::uint8_t g_tab5_keyboard_last_status { 0xff };
+bool g_tab5_keyboard_sym_active { false };
+bool g_tab5_keyboard_aa_active { false };
 std::string g_stream_watchlist_key;
 tab5::longbridge::BackoffPolicy g_wifi_backoff { 2'000, 60'000, 2 };
 tab5::longbridge::BackoffPolicy g_quote_retry_backoff { 3'000, 60'000, 2 };
@@ -108,9 +174,50 @@ std::int64_t g_next_wifi_reconnect_ms { 0 };
 std::int64_t g_next_quote_refresh_ms { 0 };
 bool g_wifi_online { false };
 bool g_quote_stream_online { false };
+std::string g_boot_warning;
+std::string g_connection_status { "offline" };
+std::atomic<KeyboardStatus> g_keyboard_status { KeyboardStatus::Wait };
+std::string g_rendered_status;
 
 bool refresh_quotes(bool allow_auth_retry = true);
 void refresh_quotes_and_schedule(bool allow_auth_retry = true);
+
+void refresh_status_line()
+{
+    std::string status = g_connection_status;
+    status += " | ";
+    switch (g_keyboard_status.load(std::memory_order_relaxed)) {
+    case KeyboardStatus::Ready:
+        status += "kbd ready";
+        break;
+    case KeyboardStatus::Input:
+        status += "kbd input";
+        break;
+    case KeyboardStatus::Lost:
+        status += "kbd lost";
+        break;
+    case KeyboardStatus::Wait:
+    default:
+        status += "kbd wait";
+        break;
+    }
+    if (g_rendered_status == status) {
+        return;
+    }
+    g_ui.set_connection_status(status);
+    g_rendered_status = std::move(status);
+}
+
+void set_connection_status(std::string status)
+{
+    g_connection_status = std::move(status);
+    refresh_status_line();
+}
+
+void set_keyboard_status(KeyboardStatus status)
+{
+    g_keyboard_status.store(status, std::memory_order_relaxed);
+}
 
 enum class Tab5PanelKind {
     Unknown,
@@ -979,10 +1086,140 @@ void seed_default_watchlist()
     }
 }
 
+void set_boot_warning(std::string warning)
+{
+    if (g_boot_warning.empty()) {
+        g_boot_warning = std::move(warning);
+    }
+}
+
+std::optional<std::string> read_text_file(const char* path)
+{
+    FILE* file = std::fopen(path, "rb");
+    if (!file) {
+        return std::nullopt;
+    }
+
+    std::string content;
+    std::array<char, 512> buffer {};
+    while (true) {
+        const std::size_t read = std::fread(buffer.data(), 1, buffer.size(), file);
+        if (read > 0) {
+            if (content.size() + read > kSdSettingsFileMaxBytes) {
+                std::fclose(file);
+                ESP_LOGW(kTag, "SD settings file is larger than %u bytes: %s",
+                         static_cast<unsigned>(kSdSettingsFileMaxBytes),
+                         path);
+                return std::nullopt;
+            }
+            content.append(buffer.data(), read);
+        }
+        if (read < buffer.size()) {
+            if (std::ferror(file)) {
+                std::fclose(file);
+                ESP_LOGW(kTag, "failed reading SD settings file: %s", path);
+                return std::nullopt;
+            }
+            break;
+        }
+    }
+
+    std::fclose(file);
+    return content;
+}
+
+bool auth_settings_match(const tab5::settings::AppSettings& left,
+                         const tab5::settings::AppSettings& right)
+{
+    return left.endpoint_region == right.endpoint_region
+        && left.longbridge_client_id == right.longbridge_client_id
+        && left.oauth_redirect_uri == right.oauth_redirect_uri;
+}
+
+void preserve_existing_tokens_if_safe(tab5::settings::SettingsFileResult& parsed,
+                                      const tab5::settings::AppSettings& existing)
+{
+    if (parsed.touched_oauth_tokens || parsed.reset_tokens || existing.oauth_tokens.empty()) {
+        return;
+    }
+    if (auth_settings_match(parsed.settings, existing)) {
+        parsed.settings.oauth_tokens = existing.oauth_tokens;
+    }
+}
+
+bool import_settings_from_sd_card()
+{
+#if __has_include("bsp/esp-bsp.h")
+    const esp_err_t mount_err = bsp_sdcard_mount();
+    const bool mounted_here = mount_err == ESP_OK;
+    if (mount_err != ESP_OK && mount_err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGI(kTag, "SD card settings import skipped: mount failed: %s", esp_err_to_name(mount_err));
+        return false;
+    }
+
+    const std::array<const char*, 4> paths {
+        BSP_SD_MOUNT_POINT "/TAB5.CFG",
+        BSP_SD_MOUNT_POINT "/TAB5.INI",
+        BSP_SD_MOUNT_POINT "/tab5_stock_terminal.conf",
+        BSP_SD_MOUNT_POINT "/tab5_stock_terminal.ini",
+    };
+
+    bool saw_file = false;
+    bool imported = false;
+    for (const char* path : paths) {
+        auto content = read_text_file(path);
+        if (!content.has_value()) {
+            continue;
+        }
+        saw_file = true;
+        auto parsed = tab5::settings::parse_settings_file(*content);
+        for (const auto& warning : parsed.warnings) {
+            ESP_LOGW(kTag, "SD settings warning: %s", warning.c_str());
+        }
+        if (!parsed.ok()) {
+            const std::string warning = std::string("SD config rejected: ")
+                + tab5::settings::settings_file_status_text(parsed.status);
+            ESP_LOGW(kTag, "%s: %s", warning.c_str(), path);
+            set_boot_warning(warning);
+            break;
+        }
+
+        preserve_existing_tokens_if_safe(parsed, g_settings);
+        const esp_err_t save_err = g_settings_store.save(parsed.settings);
+        if (save_err != ESP_OK) {
+            const std::string warning = std::string("SD config save failed: ") + esp_err_to_name(save_err);
+            ESP_LOGW(kTag, "%s", warning.c_str());
+            set_boot_warning(warning);
+            break;
+        }
+
+        g_settings = std::move(parsed.settings);
+        ESP_LOGI(kTag, "loaded settings from SD card: %s", path);
+        imported = true;
+        break;
+    }
+
+    if (!saw_file) {
+        ESP_LOGI(kTag, "no SD settings file found");
+    }
+    if (mounted_here) {
+        const esp_err_t unmount_err = bsp_sdcard_unmount();
+        if (unmount_err != ESP_OK) {
+            ESP_LOGW(kTag, "SD card unmount failed after settings import: %s", esp_err_to_name(unmount_err));
+        }
+    }
+    return imported;
+#else
+    return false;
+#endif
+}
+
 void redraw_watchlist()
 {
     g_quote_store.set_watchlist(g_settings.watchlist);
     g_ui.show_watchlist(g_quote_store.ordered_snapshots());
+    g_rendered_status.clear();
+    refresh_status_line();
 }
 
 void save_settings_and_redraw()
@@ -1306,6 +1543,639 @@ void initialize_keyboard()
 #endif
 }
 
+esp_err_t tab5_keyboard_write_register(std::uint8_t reg, std::uint8_t value)
+{
+    if (!g_tab5_keyboard_device) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    const std::uint8_t data[] = { reg, value };
+    return i2c_master_transmit(g_tab5_keyboard_device, data, sizeof(data), 100);
+}
+
+esp_err_t tab5_keyboard_read_register(std::uint8_t reg, std::uint8_t* data, std::size_t length)
+{
+    if (!g_tab5_keyboard_device) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!data || length == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    return i2c_master_transmit_receive(g_tab5_keyboard_device, &reg, 1, data, length, 100);
+}
+
+esp_err_t tab5_keyboard_clear_interrupt_status()
+{
+    return tab5_keyboard_write_register(kTab5KeyboardRegInterruptStatus, 0);
+}
+
+std::uint32_t hid_key_to_lvgl_key(std::uint8_t modifier, std::uint8_t keycode)
+{
+    const bool shifted = (modifier & 0x22U) != 0;
+    if (keycode >= 0x04 && keycode <= 0x1d) {
+        const char base = static_cast<char>('a' + (keycode - 0x04));
+        return shifted ? static_cast<std::uint32_t>(base - 'a' + 'A')
+                       : static_cast<std::uint32_t>(base);
+    }
+    if (keycode >= 0x1e && keycode <= 0x27) {
+        constexpr char normal[] = "1234567890";
+        constexpr char shifted_chars[] = "!@#$%^&*()";
+        const auto index = static_cast<std::size_t>(keycode - 0x1e);
+        return static_cast<std::uint32_t>(shifted ? shifted_chars[index] : normal[index]);
+    }
+
+    switch (keycode) {
+    case 0x28:
+        return LV_KEY_ENTER;
+    case 0x29:
+        return LV_KEY_ESC;
+    case 0x2a:
+        return LV_KEY_BACKSPACE;
+    case 0x2b:
+        return shifted ? LV_KEY_PREV : LV_KEY_NEXT;
+    case 0x2c:
+        return ' ';
+    case 0x2d:
+        return shifted ? '_' : '-';
+    case 0x2e:
+        return shifted ? '+' : '=';
+    case 0x2f:
+        return shifted ? '{' : '[';
+    case 0x30:
+        return shifted ? '}' : ']';
+    case 0x31:
+        return shifted ? '|' : '\\';
+    case 0x32:
+        return shifted ? '|' : '\\';
+    case 0x33:
+        return shifted ? ':' : ';';
+    case 0x34:
+        return shifted ? '"' : '\'';
+    case 0x35:
+        return shifted ? '~' : '`';
+    case 0x36:
+        return shifted ? '<' : ',';
+    case 0x37:
+        return shifted ? '>' : '.';
+    case 0x38:
+        return shifted ? '?' : '/';
+    case 0x4a:
+        return LV_KEY_HOME;
+    case 0x4c:
+        return LV_KEY_DEL;
+    case 0x4d:
+        return LV_KEY_END;
+    case 0x4f:
+        return LV_KEY_RIGHT;
+    case 0x50:
+        return LV_KEY_LEFT;
+    case 0x51:
+        return LV_KEY_DOWN;
+    case 0x52:
+        return LV_KEY_UP;
+    default:
+        return 0;
+    }
+}
+
+std::uint32_t raw_key_to_lvgl_key(std::uint8_t row, std::uint8_t col, bool shifted, bool symbol_layer)
+{
+    // Official keyboard firmware exposes a 5x14 matrix in normal mode.
+    // This maps the common character layers plus navigation/editing keys.
+    static constexpr std::uint32_t kBaseMap[5][14] = {
+        { LV_KEY_ESC, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '+', LV_KEY_DEL },
+        { '`', '!', '@', '#', '$', '%', '^', '&', '*', '(', ')', '[', ']', '\\' },
+        { LV_KEY_NEXT, 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', ';', '\'', LV_KEY_BACKSPACE },
+        { 0, 0, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', LV_KEY_UP, '_', LV_KEY_ENTER },
+        { 0, 0, 'z', 'x', 'c', 'v', 'b', 'n', 'm', '.', LV_KEY_LEFT, LV_KEY_DOWN, LV_KEY_RIGHT, ' ' },
+    };
+    static constexpr std::uint32_t kSymbolMap[5][14] = {
+        { LV_KEY_ESC, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '+', LV_KEY_DEL },
+        { '~', '?', '@', '#', '$', '%', '^', '&', '/', '<', '>', '{', '}', '|' },
+        { LV_KEY_NEXT, 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', ':', '"', LV_KEY_BACKSPACE },
+        { 0, 0, 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', LV_KEY_UP, '=', LV_KEY_ENTER },
+        { 0, 0, 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', LV_KEY_LEFT, LV_KEY_DOWN, LV_KEY_RIGHT, ' ' },
+    };
+    if (row >= 5 || col >= 14) {
+        return 0;
+    }
+    std::uint32_t key = symbol_layer ? kSymbolMap[row][col] : kBaseMap[row][col];
+    if (shifted && key >= 'a' && key <= 'z') {
+        key = static_cast<std::uint32_t>(key - 'a' + 'A');
+    }
+    return key;
+}
+
+std::string uppercase_ascii(std::string text)
+{
+    for (char& ch : text) {
+        ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
+    }
+    return text;
+}
+
+std::uint32_t char_event_to_lvgl_key(const std::uint8_t* data, std::size_t length)
+{
+    if (!data || length == 0) {
+        return 0;
+    }
+    if (length == 1) {
+        return static_cast<std::uint32_t>(data[0]);
+    }
+
+    const std::string text(reinterpret_cast<const char*>(data),
+                           reinterpret_cast<const char*>(data + length));
+    const std::string upper = uppercase_ascii(text);
+    if (upper == "ESC") {
+        return LV_KEY_ESC;
+    }
+    if (upper == "DEL") {
+        return LV_KEY_DEL;
+    }
+    if (upper == "BACKSPACE") {
+        return LV_KEY_BACKSPACE;
+    }
+    if (upper == "TAB") {
+        return LV_KEY_NEXT;
+    }
+    if (upper == "ENTER") {
+        return LV_KEY_ENTER;
+    }
+    if (upper == "UP") {
+        return LV_KEY_UP;
+    }
+    if (upper == "DOWN") {
+        return LV_KEY_DOWN;
+    }
+    if (upper == "LEFT") {
+        return LV_KEY_LEFT;
+    }
+    if (upper == "RIGHT") {
+        return LV_KEY_RIGHT;
+    }
+    return 0;
+}
+
+void tab5_keyboard_read_cb(lv_indev_t* indev, lv_indev_data_t* data)
+{
+    auto* ctx = static_cast<Tab5KeyboardInputContext*>(lv_indev_get_driver_data(indev));
+    if (!ctx) {
+        data->state = LV_INDEV_STATE_RELEASED;
+        data->key = 0;
+        return;
+    }
+
+    if (ctx->release_pending) {
+        data->key = ctx->last_key;
+        data->state = LV_INDEV_STATE_RELEASED;
+        ctx->release_pending = false;
+        data->continue_reading =
+            ctx->key_queue && uxQueueMessagesWaiting(ctx->key_queue) > 0;
+        return;
+    }
+
+    std::uint32_t key = 0;
+    if (ctx->key_queue && xQueueReceive(ctx->key_queue, &key, 0) == pdTRUE) {
+        ctx->last_key = key;
+        ctx->release_pending = true;
+        data->key = key;
+        data->state = LV_INDEV_STATE_PRESSED;
+        data->continue_reading = true;
+        if (ctx->logged_key_count < 20) {
+            ESP_LOGI(kTag, "Tab5 keyboard input: key=0x%02" PRIx32, key);
+            ++ctx->logged_key_count;
+        }
+        return;
+    }
+
+    data->key = ctx->last_key;
+    data->state = LV_INDEV_STATE_RELEASED;
+}
+
+void enqueue_tab5_keyboard_key(std::uint32_t key)
+{
+    if (!key || !g_tab5_keyboard_input.key_queue || !g_tab5_keyboard_indev) {
+        return;
+    }
+    if (xQueueSend(g_tab5_keyboard_input.key_queue, &key, 0) != pdTRUE) {
+        std::uint32_t dropped_key = 0;
+        (void)xQueueReceive(g_tab5_keyboard_input.key_queue, &dropped_key, 0);
+        if (xQueueSend(g_tab5_keyboard_input.key_queue, &key, 0) != pdTRUE) {
+            ESP_LOGW(kTag, "Tab5 keyboard LVGL queue is full; dropping key=0x%02" PRIx32, key);
+            return;
+        }
+    }
+    (void)lvgl_port_task_wake(LVGL_PORT_EVENT_TOUCH, g_tab5_keyboard_indev);
+}
+
+void IRAM_ATTR tab5_keyboard_gpio_isr(void*)
+{
+    if (!g_tab5_keyboard_intr_queue) {
+        return;
+    }
+    const std::uint32_t gpio = static_cast<std::uint32_t>(kTab5KeyboardInt);
+    BaseType_t higher_priority_task_woken = pdFALSE;
+    (void)xQueueSendFromISR(g_tab5_keyboard_intr_queue, &gpio, &higher_priority_task_woken);
+    if (higher_priority_task_woken == pdTRUE) {
+        portYIELD_FROM_ISR();
+    }
+}
+
+bool drain_tab5_keyboard_events()
+{
+    std::uint8_t status = 0;
+    esp_err_t err = tab5_keyboard_read_register(kTab5KeyboardRegInterruptStatus, &status, 1);
+    std::uint8_t event_count = 0;
+    const int int_level = gpio_get_level(kTab5KeyboardInt);
+    ++g_tab5_keyboard_poll_count;
+    if (err != ESP_OK) {
+        ++g_tab5_keyboard_i2c_error_count;
+        if (g_tab5_keyboard_ready && g_tab5_keyboard_i2c_error_count >= 5) {
+            ESP_LOGW(kTag, "Tab5 keyboard disconnected: %s", esp_err_to_name(err));
+            g_tab5_keyboard_ready = false;
+            g_tab5_keyboard_absent_logged = false;
+            set_keyboard_status(KeyboardStatus::Lost);
+        }
+        return false;
+    }
+
+    g_tab5_keyboard_i2c_error_count = 0;
+    err = tab5_keyboard_read_register(kTab5KeyboardRegEventCount, &event_count, 1);
+    if (err != ESP_OK) {
+        ESP_LOGW(kTag, "Tab5 keyboard event-count read failed: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    if ((status & kTab5KeyboardStatusChar) != 0) {
+        err = tab5_keyboard_read_register(kTab5KeyboardRegEventCount, &event_count, 1);
+        if (err != ESP_OK) {
+            ESP_LOGW(kTag, "Tab5 keyboard event-count read failed: %s", esp_err_to_name(err));
+            return false;
+        }
+    } else if ((status & kTab5KeyboardStatusHid) != 0) {
+        err = tab5_keyboard_read_register(kTab5KeyboardRegEventCount, &event_count, 1);
+        if (err != ESP_OK) {
+            ESP_LOGW(kTag, "Tab5 keyboard HID event-count read failed: %s", esp_err_to_name(err));
+            return false;
+        }
+    }
+    if (event_count > kTab5KeyboardMaxEvents) {
+        event_count = kTab5KeyboardMaxEvents;
+    }
+    const std::int64_t now_ms = esp_timer_get_time() / 1000;
+    const bool should_log_heartbeat =
+        now_ms - g_tab5_keyboard_last_heartbeat_ms >= 5000;
+    if (event_count > 0 || status != g_tab5_keyboard_last_status
+        || int_level != g_tab5_keyboard_last_int_level || g_tab5_keyboard_poll_count <= 3) {
+        ESP_LOGI(kTag,
+                 "Tab5 keyboard poll: status=0x%02x event_count=%u int=%d irq=%" PRIu32,
+                 status,
+                 event_count,
+                 int_level,
+                 static_cast<std::uint32_t>(g_tab5_keyboard_irq_count));
+        g_tab5_keyboard_last_status = status;
+        g_tab5_keyboard_last_int_level = int_level;
+    }
+    if (should_log_heartbeat) {
+        std::uint8_t mode = 0xff;
+        std::uint8_t interrupt_config = 0xff;
+        (void)tab5_keyboard_read_register(kTab5KeyboardRegMode, &mode, 1);
+        (void)tab5_keyboard_read_register(kTab5KeyboardRegInterruptConfig, &interrupt_config, 1);
+        ESP_LOGI(kTag,
+                 "Tab5 keyboard heartbeat: status=0x%02x event_count=%u int=%d irq=%" PRIu32
+                 " polls=%" PRIu32 " mode=%u INT_CFG=0x%02x",
+                 status,
+                 event_count,
+                 int_level,
+                 static_cast<std::uint32_t>(g_tab5_keyboard_irq_count),
+                 g_tab5_keyboard_poll_count,
+                 mode,
+                 interrupt_config);
+        g_tab5_keyboard_last_heartbeat_ms = now_ms;
+    }
+    if (event_count > 0 && g_tab5_keyboard_input.logged_raw_event_count < 40) {
+        ESP_LOGI(kTag, "Tab5 keyboard queued decoded events: %u", event_count);
+    }
+    if (event_count > 0) {
+        set_keyboard_status(KeyboardStatus::Input);
+    }
+
+    if ((status & kTab5KeyboardStatusChar) != 0) {
+        for (std::uint8_t i = 0; i < event_count; ++i) {
+            std::uint8_t event_length = 0;
+            err = tab5_keyboard_read_register(kTab5KeyboardRegCharEventLength, &event_length, 1);
+            if (err != ESP_OK) {
+                ESP_LOGW(kTag, "Tab5 keyboard char-event length read failed: %s", esp_err_to_name(err));
+                return false;
+            }
+            if (event_length == 0) {
+                break;
+            }
+            const std::size_t bytes_to_read = static_cast<std::size_t>(event_length) + 1U;
+            if (bytes_to_read > kTab5KeyboardCharEventMaxBytes) {
+                ESP_LOGW(kTag, "Tab5 keyboard char-event length out of range: %u", event_length);
+                (void)tab5_keyboard_clear_interrupt_status();
+                return false;
+            }
+
+            std::array<std::uint8_t, kTab5KeyboardCharEventMaxBytes> buffer {};
+            err = tab5_keyboard_read_register(kTab5KeyboardRegCharEvent, buffer.data(), bytes_to_read);
+            if (err != ESP_OK) {
+                ESP_LOGW(kTag, "Tab5 keyboard char-event read failed: %s", esp_err_to_name(err));
+                return false;
+            }
+
+            const std::uint8_t modifier = buffer[0];
+            const std::size_t text_length = static_cast<std::size_t>(event_length);
+            const std::uint32_t lv_key = char_event_to_lvgl_key(&buffer[1], text_length);
+            if (g_tab5_keyboard_input.logged_raw_event_count < 40) {
+                const std::string text(reinterpret_cast<const char*>(&buffer[1]),
+                                       reinterpret_cast<const char*>(&buffer[1] + text_length));
+                ESP_LOGI(kTag,
+                         "Tab5 keyboard char event: mod=0x%02x len=%u text='%s' key=0x%02" PRIx32,
+                         modifier,
+                         static_cast<unsigned>(text_length),
+                         text.c_str(),
+                         lv_key);
+                ++g_tab5_keyboard_input.logged_raw_event_count;
+            }
+            if (lv_key != 0) {
+                enqueue_tab5_keyboard_key(lv_key);
+            }
+        }
+    } else if ((status & kTab5KeyboardStatusHid) != 0) {
+        for (std::uint8_t i = 0; i < event_count; ++i) {
+            std::uint8_t buffer[2] {};
+            err = tab5_keyboard_read_register(kTab5KeyboardRegHidEvent, buffer, sizeof(buffer));
+            if (err != ESP_OK) {
+                ESP_LOGW(kTag, "Tab5 keyboard HID-event read failed: %s", esp_err_to_name(err));
+                return false;
+            }
+            if (buffer[0] == kTab5KeyboardEmptyEvent && buffer[1] == kTab5KeyboardEmptyEvent) {
+                break;
+            }
+            const std::uint32_t lv_key = hid_key_to_lvgl_key(buffer[0], buffer[1]);
+            if (g_tab5_keyboard_input.logged_raw_event_count < 40) {
+                ESP_LOGI(kTag,
+                         "Tab5 keyboard HID event: mod=0x%02x keycode=0x%02x key=0x%02" PRIx32,
+                         buffer[0],
+                         buffer[1],
+                         lv_key);
+                ++g_tab5_keyboard_input.logged_raw_event_count;
+            }
+            if (buffer[1] != 0 && lv_key != 0) {
+                enqueue_tab5_keyboard_key(lv_key);
+            }
+        }
+    } else if ((status & kTab5KeyboardStatusKey) != 0 || event_count > 0) {
+        for (std::uint8_t i = 0; i < event_count; ++i) {
+            std::uint8_t raw_event = 0xff;
+            err = tab5_keyboard_read_register(kTab5KeyboardRegKeyEvent, &raw_event, 1);
+            if (err != ESP_OK) {
+                ESP_LOGW(kTag, "Tab5 keyboard key-event read failed: %s", esp_err_to_name(err));
+                return false;
+            }
+            if (raw_event == kTab5KeyboardEmptyEvent) {
+                break;
+            }
+            const bool pressed = (raw_event & 0x80U) != 0;
+            const std::uint8_t row = (raw_event >> 4U) & 0x07U;
+            const std::uint8_t col = raw_event & 0x0fU;
+            if (row == 3 && col == 0) {
+                g_tab5_keyboard_sym_active = pressed;
+                continue;
+            }
+            if (row == 3 && col == 1) {
+                g_tab5_keyboard_aa_active = pressed;
+                continue;
+            }
+            const std::uint32_t lv_key =
+                raw_key_to_lvgl_key(row, col, g_tab5_keyboard_aa_active, g_tab5_keyboard_sym_active);
+            if (g_tab5_keyboard_input.logged_raw_event_count < 40) {
+                ESP_LOGI(kTag,
+                         "Tab5 keyboard raw event: raw=0x%02x pressed=%d row=%u col=%u key=0x%02" PRIx32,
+                         raw_event,
+                         pressed ? 1 : 0,
+                         row,
+                         col,
+                         lv_key);
+                ++g_tab5_keyboard_input.logged_raw_event_count;
+            }
+            if (pressed && lv_key != 0) {
+                enqueue_tab5_keyboard_key(lv_key);
+            }
+        }
+    }
+    if (status != 0) {
+        const esp_err_t clear_err = tab5_keyboard_clear_interrupt_status();
+        if (clear_err != ESP_OK) {
+            ESP_LOGW(kTag, "Tab5 keyboard interrupt-status clear failed: %s", esp_err_to_name(clear_err));
+        }
+    }
+    return true;
+}
+
+bool configure_tab5_keyboard_device()
+{
+    std::uint8_t version = 0;
+    const esp_err_t version_err =
+        tab5_keyboard_read_register(kTab5KeyboardRegFirmwareVersion, &version, 1);
+    if (version_err != ESP_OK) {
+        return false;
+    }
+    (void)tab5_keyboard_write_register(kTab5KeyboardRegMode, kTab5KeyboardModeHid);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    (void)tab5_keyboard_write_register(kTab5KeyboardRegEventCount, 0);
+    (void)tab5_keyboard_clear_interrupt_status();
+    const esp_err_t mode_err =
+        tab5_keyboard_write_register(kTab5KeyboardRegMode, kTab5KeyboardModeKey);
+    if (mode_err != ESP_OK) {
+        ESP_LOGW(kTag, "Tab5 keyboard mode setup failed: %s", esp_err_to_name(mode_err));
+        return false;
+    }
+    const esp_err_t interrupt_err =
+        tab5_keyboard_write_register(kTab5KeyboardRegInterruptConfig, kTab5KeyboardInterruptKey);
+    if (interrupt_err != ESP_OK) {
+        ESP_LOGW(kTag, "Tab5 keyboard interrupt setup failed: %s", esp_err_to_name(interrupt_err));
+        return false;
+    }
+    std::uint8_t ignored_status = 0;
+    (void)tab5_keyboard_read_register(kTab5KeyboardRegInterruptStatus, &ignored_status, 1);
+    (void)tab5_keyboard_write_register(kTab5KeyboardRegEventCount, 0);
+    (void)tab5_keyboard_clear_interrupt_status();
+    std::uint8_t actual_mode = 0xff;
+    std::uint8_t actual_interrupt_config = 0xff;
+    (void)tab5_keyboard_read_register(kTab5KeyboardRegMode, &actual_mode, 1);
+    (void)tab5_keyboard_read_register(kTab5KeyboardRegInterruptConfig, &actual_interrupt_config, 1);
+    ESP_LOGI(kTag,
+             "Tab5 keyboard detected at 0x%02x on I2C%d (fw=0x%02x, mode=%u, INT_CFG=0x%02x, speed=%u)",
+             kTab5KeyboardAddress,
+             static_cast<int>(kTab5KeyboardI2CPort),
+             version,
+             actual_mode,
+             actual_interrupt_config,
+             static_cast<unsigned>(kTab5KeyboardI2CFrequencyHz));
+    g_tab5_keyboard_ready = true;
+    g_tab5_keyboard_absent_logged = false;
+    g_tab5_keyboard_i2c_error_count = 0;
+    g_tab5_keyboard_poll_count = 0;
+    g_tab5_keyboard_irq_count = 0;
+    g_tab5_keyboard_last_heartbeat_ms = 0;
+    g_tab5_keyboard_last_int_level = -1;
+    g_tab5_keyboard_last_status = 0xff;
+    g_tab5_keyboard_sym_active = false;
+    g_tab5_keyboard_aa_active = false;
+    set_keyboard_status(KeyboardStatus::Ready);
+    return true;
+}
+
+void tab5_keyboard_task(void*)
+{
+    while (true) {
+        if (!g_tab5_keyboard_device) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+        if (!g_tab5_keyboard_ready) {
+            if (!configure_tab5_keyboard_device()) {
+                if (!g_tab5_keyboard_absent_logged) {
+                    ESP_LOGW(kTag,
+                             "Tab5 keyboard not detected at 0x%02x on ExtPort1 I2C%d; retrying",
+                             kTab5KeyboardAddress,
+                             static_cast<int>(kTab5KeyboardI2CPort));
+                    g_tab5_keyboard_absent_logged = true;
+                }
+                set_keyboard_status(KeyboardStatus::Wait);
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                continue;
+            }
+        }
+        if (g_tab5_keyboard_intr_queue) {
+            std::uint32_t gpio = 0;
+            if (xQueueReceive(g_tab5_keyboard_intr_queue, &gpio, pdMS_TO_TICKS(20)) == pdTRUE) {
+                ++g_tab5_keyboard_irq_count;
+                while (xQueueReceive(g_tab5_keyboard_intr_queue, &gpio, 0) == pdTRUE) {
+                    ++g_tab5_keyboard_irq_count;
+                }
+            }
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+        (void)drain_tab5_keyboard_events();
+    }
+}
+
+void initialize_tab5_keyboard_i2c_input()
+{
+#if __has_include("esp_lvgl_port.h")
+    if (!g_display || !g_ui.focus_group()) {
+        ESP_LOGW(kTag, "Tab5 keyboard input skipped: display or focus group is not ready");
+        return;
+    }
+
+    g_tab5_keyboard_input.key_queue =
+        xQueueCreate(kTab5KeyboardQueueSize, sizeof(std::uint32_t));
+    if (!g_tab5_keyboard_input.key_queue) {
+        ESP_LOGW(kTag, "Tab5 keyboard queue allocation failed");
+        return;
+    }
+
+    lvgl_port_lock(0);
+    g_tab5_keyboard_indev = lv_indev_create();
+    if (g_tab5_keyboard_indev) {
+        lv_indev_set_type(g_tab5_keyboard_indev, LV_INDEV_TYPE_KEYPAD);
+        lv_indev_set_mode(g_tab5_keyboard_indev, LV_INDEV_MODE_TIMER);
+        lv_indev_set_read_cb(g_tab5_keyboard_indev, tab5_keyboard_read_cb);
+        lv_indev_set_disp(g_tab5_keyboard_indev, g_display);
+        lv_indev_set_driver_data(g_tab5_keyboard_indev, &g_tab5_keyboard_input);
+        lv_indev_set_group(g_tab5_keyboard_indev, g_ui.focus_group());
+    }
+    lvgl_port_unlock();
+
+    if (!g_tab5_keyboard_indev) {
+        ESP_LOGW(kTag, "Tab5 keyboard LVGL input device was not created");
+        vQueueDelete(g_tab5_keyboard_input.key_queue);
+        g_tab5_keyboard_input.key_queue = nullptr;
+        return;
+    }
+
+    gpio_config_t int_config {};
+    int_config.pin_bit_mask = 1ULL << kTab5KeyboardInt;
+    int_config.mode = GPIO_MODE_INPUT;
+    int_config.pull_up_en = GPIO_PULLUP_ENABLE;
+    int_config.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    int_config.intr_type = GPIO_INTR_NEGEDGE;
+    ESP_ERROR_CHECK_WITHOUT_ABORT(gpio_config(&int_config));
+
+    g_tab5_keyboard_intr_queue = xQueueCreate(8, sizeof(std::uint32_t));
+    if (!g_tab5_keyboard_intr_queue) {
+        ESP_LOGW(kTag, "Tab5 keyboard interrupt queue allocation failed; polling only");
+    } else {
+        const esp_err_t isr_service_err = gpio_install_isr_service(0);
+        if (isr_service_err != ESP_OK && isr_service_err != ESP_ERR_INVALID_STATE) {
+            ESP_LOGW(kTag,
+                     "Tab5 keyboard GPIO ISR service setup failed: %s; polling only",
+                     esp_err_to_name(isr_service_err));
+            vQueueDelete(g_tab5_keyboard_intr_queue);
+            g_tab5_keyboard_intr_queue = nullptr;
+        } else {
+            const esp_err_t isr_err =
+                gpio_isr_handler_add(kTab5KeyboardInt, tab5_keyboard_gpio_isr, nullptr);
+            if (isr_err != ESP_OK && isr_err != ESP_ERR_INVALID_STATE) {
+                ESP_LOGW(kTag,
+                         "Tab5 keyboard GPIO ISR setup failed: %s; polling only",
+                         esp_err_to_name(isr_err));
+                vQueueDelete(g_tab5_keyboard_intr_queue);
+                g_tab5_keyboard_intr_queue = nullptr;
+            }
+        }
+    }
+
+    i2c_master_bus_config_t bus_config {};
+    bus_config.i2c_port = kTab5KeyboardI2CPort;
+    bus_config.sda_io_num = kTab5KeyboardSda;
+    bus_config.scl_io_num = kTab5KeyboardScl;
+    bus_config.clk_source = I2C_CLK_SRC_DEFAULT;
+    bus_config.glitch_ignore_cnt = 7;
+    bus_config.flags.enable_internal_pullup = true;
+
+    esp_err_t err = i2c_new_master_bus(&bus_config, &g_tab5_keyboard_bus);
+    if (err == ESP_ERR_INVALID_STATE) {
+        err = i2c_master_get_bus_handle(kTab5KeyboardI2CPort, &g_tab5_keyboard_bus);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGW(kTag, "Tab5 keyboard I2C bus init failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    i2c_device_config_t device_config {};
+    device_config.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+    device_config.device_address = kTab5KeyboardAddress;
+    device_config.scl_speed_hz = kTab5KeyboardI2CFrequencyHz;
+
+    err = i2c_master_bus_add_device(g_tab5_keyboard_bus, &device_config, &g_tab5_keyboard_device);
+    if (err != ESP_OK) {
+        ESP_LOGW(kTag, "Tab5 keyboard I2C device add failed: %s", esp_err_to_name(err));
+        return;
+    }
+
+    (void)configure_tab5_keyboard_device();
+    BaseType_t task_created =
+        xTaskCreate(tab5_keyboard_task, "tab5_kbd", 4096, nullptr, 5, nullptr);
+    if (task_created != pdPASS) {
+        ESP_LOGW(kTag, "Tab5 keyboard polling task was not created");
+        return;
+    }
+    ESP_LOGI(kTag,
+             "Tab5 keyboard I2C input initialized on SDA=%d SCL=%d INT=%d addr=0x%02x",
+             static_cast<int>(kTab5KeyboardSda),
+             static_cast<int>(kTab5KeyboardScl),
+             static_cast<int>(kTab5KeyboardInt),
+             kTab5KeyboardAddress);
+#else
+    ESP_LOGW(kTag, "Tab5 keyboard input support is unavailable in this build");
+#endif
+}
+
 void queue_oauth_callback(const tab5::auth::OAuthCallbackParams& params)
 {
     if (!g_oauth_mutex) {
@@ -1385,7 +2255,7 @@ void configure_longbridge()
         g_settings.oauth_tokens.access_token,
     });
     g_longbridge.on_state([](const std::string& state) {
-        g_ui.set_connection_status(state);
+        set_connection_status(state);
     });
     g_longbridge.on_quote_delta([](const tab5::quotes::QuoteDelta& delta) {
         queue_quote_delta(delta);
@@ -1547,7 +2417,7 @@ bool ensure_quote_stream()
 
     g_stream_watchlist_key = key;
     g_quote_stream_online = true;
-    g_ui.set_connection_status("quote stream live");
+    set_connection_status("quote stream live");
     return true;
 }
 
@@ -1691,7 +2561,7 @@ void handle_wifi_state(std::int64_t now_ms)
             g_wifi_backoff.reset();
             g_next_wifi_reconnect_ms = 0;
             g_next_quote_refresh_ms = 0;
-            g_ui.set_connection_status("wifi connected");
+            set_connection_status("wifi connected");
         }
         return;
     }
@@ -1716,7 +2586,7 @@ void handle_wifi_state(std::int64_t now_ms)
     }
 
     xEventGroupClearBits(g_wifi_events, kWifiFailedBit);
-    g_ui.set_connection_status("wifi reconnecting");
+    set_connection_status("wifi reconnecting");
     const esp_err_t err = esp_wifi_connect();
     if (err != ESP_OK && err != ESP_ERR_WIFI_CONN) {
         ESP_LOGW(kTag, "wifi reconnect failed to start: %s", esp_err_to_name(err));
@@ -1778,6 +2648,8 @@ void show_oauth_flow()
         });
 
     g_ui.show_oauth_url(tab5::auth::build_authorization_url(config, g_oauth_state, g_pkce.challenge));
+    g_rendered_status.clear();
+    refresh_status_line();
     if (!server_started) {
         g_ui.set_error("local OAuth callback server failed; use the temporary callback helper for this login");
     } else {
@@ -1813,7 +2685,7 @@ void handle_setup_save(PendingSetup setup)
     g_ui.clear_error();
     if (g_settings.wifi.complete()) {
         if (start_wifi_sta(g_settings.wifi)) {
-            g_ui.set_connection_status("wifi connected");
+            set_connection_status("wifi connected");
             if (!g_settings.oauth_tokens.empty()) {
                 refresh_quotes_and_schedule();
             }
@@ -1822,6 +2694,8 @@ void handle_setup_save(PendingSetup setup)
         }
     }
     g_ui.show_setup(g_settings);
+    g_rendered_status.clear();
+    refresh_status_line();
 }
 
 void handle_add_symbol(const std::string& text)
@@ -1872,7 +2746,10 @@ void handle_reset_settings()
     }
     g_settings = tab5::settings::AppSettings {};
     seed_default_watchlist();
+    g_connection_status = "setup";
     g_ui.show_setup(g_settings);
+    g_rendered_status.clear();
+    refresh_status_line();
 }
 
 void process_pending_actions()
@@ -1973,6 +2850,7 @@ extern "C" void app_main(void)
     if (g_settings_store.load(g_settings) != ESP_OK) {
         g_settings = tab5::settings::AppSettings {};
     }
+    const bool imported_sd_settings = import_settings_from_sd_card();
     seed_default_watchlist();
     g_quote_store.set_watchlist(g_settings.watchlist);
 
@@ -1980,16 +2858,23 @@ extern "C" void app_main(void)
     ESP_LOGI(kTag, "initializing terminal UI");
     g_ui.init(screen, callbacks());
     initialize_keyboard();
+    initialize_tab5_keyboard_i2c_input();
+    if (!g_boot_warning.empty()) {
+        g_ui.set_error(g_boot_warning);
+    }
 
     if (!g_settings.wifi.complete()) {
         ESP_LOGI(kTag, "showing setup screen; Wi-Fi credentials are incomplete");
+        g_connection_status = "setup";
         g_ui.show_setup(g_settings);
         resume_display_refresh(screen);
     } else {
-        ESP_LOGI(kTag, "showing watchlist before network startup");
+        ESP_LOGI(kTag,
+                 "showing watchlist before network startup%s",
+                 imported_sd_settings ? " after SD settings import" : "");
         redraw_watchlist();
         resume_display_refresh(screen);
-        g_ui.set_connection_status("wifi connecting");
+        set_connection_status("wifi connecting");
         start_wifi_sta(g_settings.wifi);
         refresh_quotes_and_schedule();
     }
@@ -2002,6 +2887,7 @@ extern "C" void app_main(void)
         const std::int64_t now_ms = esp_timer_get_time() / 1000;
         handle_wifi_state(now_ms);
         handle_quote_stream_state(now_ms);
+        refresh_status_line();
         if (g_quote_store.mark_stale_older_than(now_ms, kQuoteStaleAfterMs)) {
             redraw_watchlist();
         }

@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "settings_store.cpp"
+    SRCS "settings_store.cpp" "settings_file.cpp"
     INCLUDE_DIRS "include"
     REQUIRES auth longbridge quotes nvs_flash
 )

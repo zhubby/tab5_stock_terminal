@@ -22,6 +22,10 @@ constexpr std::uint32_t kBorder = 0xb9c5d0;
 constexpr std::uint32_t kAccent = 0x1565c0;
 constexpr std::uint32_t kAccentDark = 0x0d47a1;
 constexpr std::uint32_t kError = 0xb42318;
+constexpr std::uint32_t kFocus = 0x00a3a3;
+constexpr std::size_t kSymbolInputMaxLength = 24;
+constexpr std::size_t kWifiInputMaxLength = 96;
+constexpr std::size_t kOAuthInputMaxLength = 256;
 
 std::string money(const std::optional<double>& value)
 {
@@ -76,29 +80,6 @@ lv_obj_t* make_label(lv_obj_t* parent, const char* text, lv_coord_t x, lv_coord_
     lv_obj_set_style_text_color(label, color_hex(kMutedText), LV_PART_MAIN);
     lv_obj_align(label, LV_ALIGN_TOP_LEFT, x, y);
     return label;
-}
-
-lv_obj_t* make_textarea(lv_obj_t* parent,
-                        const char* placeholder,
-                        const std::string& value,
-                        lv_coord_t x,
-                        lv_coord_t y,
-                        lv_coord_t width,
-                        bool password = false)
-{
-    lv_obj_t* textarea = lv_textarea_create(parent);
-    lv_obj_set_size(textarea, width, 40);
-    lv_textarea_set_one_line(textarea, true);
-    lv_textarea_set_placeholder_text(textarea, placeholder);
-    lv_textarea_set_text(textarea, value.c_str());
-    lv_textarea_set_password_mode(textarea, password);
-    lv_obj_set_style_bg_color(textarea, color_hex(0xffffff), LV_PART_MAIN);
-    lv_obj_set_style_text_color(textarea, color_hex(kText), LV_PART_MAIN);
-    lv_obj_set_style_border_color(textarea, color_hex(kBorder), LV_PART_MAIN);
-    lv_obj_set_style_border_width(textarea, 1, LV_PART_MAIN);
-    lv_obj_set_style_radius(textarea, 3, LV_PART_MAIN);
-    lv_obj_align(textarea, LV_ALIGN_TOP_LEFT, x, y);
-    return textarea;
 }
 
 lv_obj_t* make_button(lv_obj_t* parent, const char* text, lv_coord_t x, lv_coord_t y)
@@ -195,16 +176,29 @@ void TerminalUi::reset_content()
     if (!content_) {
         return;
     }
+    if (focus_group_) {
+        lv_group_remove_all_objs(focus_group_);
+    }
     lv_obj_clean(content_);
     table_ = nullptr;
     detail_ = nullptr;
     detail_text_ = nullptr;
     input_ = nullptr;
+    input_label_ = nullptr;
     ssid_input_ = nullptr;
+    ssid_input_label_ = nullptr;
     password_input_ = nullptr;
+    password_input_label_ = nullptr;
     client_id_input_ = nullptr;
+    client_id_input_label_ = nullptr;
     redirect_uri_input_ = nullptr;
+    redirect_uri_input_label_ = nullptr;
     endpoint_dropdown_ = nullptr;
+    input_text_.clear();
+    ssid_input_text_.clear();
+    password_input_text_.clear();
+    client_id_input_text_.clear();
+    redirect_uri_input_text_.clear();
 }
 
 void TerminalUi::show_setup(const settings::AppSettings& settings)
@@ -221,12 +215,28 @@ void TerminalUi::show_setup(const settings::AppSettings& settings)
     lv_obj_align(heading, LV_ALIGN_TOP_LEFT, 4, 4);
 
     make_label(content_, "Wi-Fi SSID", 4, 54);
-    ssid_input_ = make_textarea(content_, "Office Wi-Fi", settings.wifi.ssid, 170, 42, 420);
+    create_input(content_,
+                 "Office Wi-Fi",
+                 settings.wifi.ssid,
+                 170,
+                 42,
+                 420,
+                 &ssid_input_,
+                 &ssid_input_label_,
+                 &ssid_input_text_);
     add_focus(ssid_input_);
 
     make_label(content_, "Wi-Fi password", 4, 108);
-    password_input_ =
-        make_textarea(content_, "password", settings.wifi.password, 170, 96, 420, true);
+    create_input(content_,
+                 "password",
+                 settings.wifi.password,
+                 170,
+                 96,
+                 420,
+                 &password_input_,
+                 &password_input_label_,
+                 &password_input_text_,
+                 true);
     add_focus(password_input_);
 
     make_label(content_, "Endpoint", 4, 162);
@@ -244,12 +254,27 @@ void TerminalUi::show_setup(const settings::AppSettings& settings)
     add_focus(endpoint_dropdown_);
 
     make_label(content_, "Longbridge client_id", 4, 216);
-    client_id_input_ = make_textarea(content_, "OAuth client id", settings.longbridge_client_id, 170, 204, 620);
+    create_input(content_,
+                 "OAuth client id",
+                 settings.longbridge_client_id,
+                 170,
+                 204,
+                 620,
+                 &client_id_input_,
+                 &client_id_input_label_,
+                 &client_id_input_text_);
     add_focus(client_id_input_);
 
     make_label(content_, "Callback URI", 4, 270);
-    redirect_uri_input_ =
-        make_textarea(content_, "http://tab5-stock.local/oauth/callback", settings.oauth_redirect_uri, 170, 258, 760);
+    create_input(content_,
+                 "http://tab5-stock.local/oauth/callback",
+                 settings.oauth_redirect_uri,
+                 170,
+                 258,
+                 760,
+                 &redirect_uri_input_,
+                 &redirect_uri_input_label_,
+                 &redirect_uri_input_text_);
     add_focus(redirect_uri_input_);
 
     lv_obj_t* save = make_button(content_, "Save", 170, 324);
@@ -299,6 +324,10 @@ void TerminalUi::show_setup(const settings::AppSettings& settings)
     lv_obj_set_width(summary, 540);
     lv_obj_set_style_text_color(summary, color_hex(kMutedText), LV_PART_MAIN);
     lv_obj_align(summary, LV_ALIGN_TOP_LEFT, 4, 390);
+
+    if (ssid_input_) {
+        lv_group_focus_obj(ssid_input_);
+    }
 }
 
 void TerminalUi::show_oauth_url(const std::string& url)
@@ -432,8 +461,8 @@ void TerminalUi::build_watchlist_table(const std::vector<quotes::QuoteSnapshot>&
     update_detail_text();
     lv_obj_align(detail_text_, LV_ALIGN_TOP_LEFT, 12, 12);
 
-    lv_obj_t* refresh = make_button(detail_, "Refresh", 12, 486);
-    lv_obj_set_size(refresh, 138, 38);
+    lv_obj_t* refresh = make_button(detail_, "Refresh", 12, 470);
+    lv_obj_set_size(refresh, 138, 36);
     add_focus(refresh);
     lv_obj_add_event_cb(
         refresh,
@@ -446,8 +475,8 @@ void TerminalUi::build_watchlist_table(const std::vector<quotes::QuoteSnapshot>&
         LV_EVENT_CLICKED,
         this);
 
-    lv_obj_t* remove = make_button(detail_, "Remove", 168, 486);
-    lv_obj_set_size(remove, 138, 38);
+    lv_obj_t* remove = make_button(detail_, "Remove", 168, 470);
+    lv_obj_set_size(remove, 138, 36);
     add_focus(remove);
     lv_obj_add_event_cb(
         remove,
@@ -460,8 +489,22 @@ void TerminalUi::build_watchlist_table(const std::vector<quotes::QuoteSnapshot>&
         LV_EVENT_CLICKED,
         this);
 
-    lv_obj_t* reset = make_button(detail_, "Reset", 12, 532);
-    lv_obj_set_size(reset, 294, 36);
+    lv_obj_t* oauth = make_button(detail_, "OAuth", 12, 512);
+    lv_obj_set_size(oauth, 138, 36);
+    add_focus(oauth);
+    lv_obj_add_event_cb(
+        oauth,
+        [](lv_event_t* event) {
+            auto* self = static_cast<TerminalUi*>(lv_event_get_user_data(event));
+            if (self->callbacks_.start_oauth) {
+                self->callbacks_.start_oauth();
+            }
+        },
+        LV_EVENT_CLICKED,
+        this);
+
+    lv_obj_t* reset = make_button(detail_, "Reset", 168, 512);
+    lv_obj_set_size(reset, 138, 36);
     add_focus(reset);
     lv_obj_add_event_cb(
         reset,
@@ -474,16 +517,7 @@ void TerminalUi::build_watchlist_table(const std::vector<quotes::QuoteSnapshot>&
         LV_EVENT_CLICKED,
         this);
 
-    input_ = lv_textarea_create(detail_);
-    lv_obj_set_size(input_, 210, 40);
-    lv_textarea_set_one_line(input_, true);
-    lv_textarea_set_placeholder_text(input_, "AAPL.US");
-    lv_obj_set_style_bg_color(input_, color_hex(0xffffff), LV_PART_MAIN);
-    lv_obj_set_style_text_color(input_, color_hex(kText), LV_PART_MAIN);
-    lv_obj_set_style_border_color(input_, color_hex(kBorder), LV_PART_MAIN);
-    lv_obj_set_style_border_width(input_, 1, LV_PART_MAIN);
-    lv_obj_set_style_radius(input_, 3, LV_PART_MAIN);
-    lv_obj_align(input_, LV_ALIGN_BOTTOM_LEFT, 12, -8);
+    create_input(detail_, "AAPL.US", "", 12, 572, 210, &input_, &input_label_, &input_text_);
     add_focus(input_);
 
     lv_obj_t* add = make_button(detail_, "Add", 232, 572);
@@ -497,6 +531,10 @@ void TerminalUi::build_watchlist_table(const std::vector<quotes::QuoteSnapshot>&
         },
         LV_EVENT_CLICKED,
         this);
+
+    if (input_) {
+        lv_group_focus_obj(input_);
+    }
 }
 
 void TerminalUi::update_selected_row_from_table()
@@ -544,6 +582,86 @@ void TerminalUi::update_detail_text()
     lv_label_set_text(detail_text_, text.c_str());
 }
 
+lv_obj_t* TerminalUi::create_input(lv_obj_t* parent,
+                                   const char* placeholder,
+                                   const std::string& value,
+                                   lv_coord_t x,
+                                   lv_coord_t y,
+                                   lv_coord_t width,
+                                   lv_obj_t** object_slot,
+                                   lv_obj_t** label_slot,
+                                   std::string* text_slot,
+                                   bool password)
+{
+    lv_obj_t* input = lv_obj_create(parent);
+    if (object_slot) {
+        *object_slot = input;
+    }
+    if (text_slot) {
+        *text_slot = value;
+    }
+    lv_obj_set_size(input, width, 40);
+    lv_obj_align(input, LV_ALIGN_TOP_LEFT, x, y);
+    lv_obj_add_flag(input, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(input, LV_OBJ_FLAG_CLICK_FOCUSABLE);
+    lv_obj_remove_flag(input, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_remove_flag(input, LV_OBJ_FLAG_SCROLL_ON_FOCUS);
+    lv_obj_set_style_bg_color(input, color_hex(0xffffff), LV_PART_MAIN);
+    lv_obj_set_style_text_color(input, color_hex(kText), LV_PART_MAIN);
+    lv_obj_set_style_border_color(input, color_hex(kBorder), LV_PART_MAIN);
+    lv_obj_set_style_border_width(input, 1, LV_PART_MAIN);
+    lv_obj_set_style_border_color(
+        input,
+        color_hex(kFocus),
+        static_cast<lv_style_selector_t>(LV_PART_MAIN) | static_cast<lv_style_selector_t>(LV_STATE_FOCUSED));
+    lv_obj_set_style_border_width(
+        input,
+        2,
+        static_cast<lv_style_selector_t>(LV_PART_MAIN) | static_cast<lv_style_selector_t>(LV_STATE_FOCUSED));
+    lv_obj_set_style_radius(input, 3, LV_PART_MAIN);
+    lv_obj_set_style_pad_left(input, 10, LV_PART_MAIN);
+    lv_obj_set_style_pad_right(input, 10, LV_PART_MAIN);
+    lv_obj_set_style_pad_top(input, 8, LV_PART_MAIN);
+    lv_obj_set_style_pad_bottom(input, 6, LV_PART_MAIN);
+
+    lv_obj_t* label = lv_label_create(input);
+    lv_label_set_long_mode(label, LV_LABEL_LONG_MODE_CLIP);
+    lv_obj_set_width(label, width - 20);
+    lv_obj_set_style_text_color(label, color_hex(kText), LV_PART_MAIN);
+    lv_obj_align(label, LV_ALIGN_LEFT_MID, 0, 0);
+    if (label_slot) {
+        *label_slot = label;
+    }
+
+    lv_obj_add_event_cb(
+        input,
+        [](lv_event_t* event) {
+            auto* self = static_cast<TerminalUi*>(lv_event_get_user_data(event));
+            lv_obj_t* target = lv_event_get_current_target_obj(event);
+            switch (lv_event_get_code(event)) {
+            case LV_EVENT_KEY:
+                self->handle_input_key(target, lv_event_get_key(event));
+                break;
+            case LV_EVENT_FOCUSED:
+            case LV_EVENT_DEFOCUSED:
+                self->refresh_input(target);
+                break;
+            case LV_EVENT_CLICKED:
+                if (self->focus_group()) {
+                    lv_group_focus_obj(target);
+                }
+                break;
+            default:
+                break;
+            }
+        },
+        LV_EVENT_ALL,
+        this);
+
+    refresh_input(input);
+    return input;
+}
+
 void TerminalUi::set_connection_status(const std::string& status)
 {
     DisplayLock lock;
@@ -569,6 +687,145 @@ void TerminalUi::add_focus(lv_obj_t* object)
     }
 }
 
+void TerminalUi::handle_input_key(lv_obj_t* object, std::uint32_t key)
+{
+    std::string* text = input_text_for(object);
+    if (!text) {
+        return;
+    }
+
+    if (key == LV_KEY_NEXT) {
+        lv_group_focus_next(focus_group_);
+        return;
+    }
+    if (key == LV_KEY_PREV) {
+        lv_group_focus_prev(focus_group_);
+        return;
+    }
+    if (key == LV_KEY_ESC) {
+        text->clear();
+        refresh_input(object);
+        return;
+    }
+    if (key == LV_KEY_BACKSPACE || key == LV_KEY_DEL) {
+        if (!text->empty()) {
+            text->pop_back();
+            refresh_input(object);
+        }
+        return;
+    }
+    if (key == LV_KEY_ENTER) {
+        if (object == input_) {
+            add_symbol_from_input();
+        } else {
+            save_setup_from_controls();
+        }
+        return;
+    }
+    if (key < 0x20 || key > 0x7e || text->size() >= input_max_length_for(object)) {
+        return;
+    }
+
+    text->push_back(static_cast<char>(key));
+    refresh_input(object);
+}
+
+void TerminalUi::refresh_input(lv_obj_t* object)
+{
+    lv_obj_t* label = input_label_for(object);
+    std::string* text = input_text_for(object);
+    if (!label || !text) {
+        return;
+    }
+
+    if (text->empty()) {
+        lv_label_set_text(label, input_placeholder_for(object));
+        lv_obj_set_style_text_color(label, color_hex(kMutedText), LV_PART_MAIN);
+        return;
+    }
+
+    if (input_is_password(object)) {
+        std::string masked(text->size(), '*');
+        lv_label_set_text(label, masked.c_str());
+    } else {
+        lv_label_set_text(label, text->c_str());
+    }
+    lv_obj_set_style_text_color(label, color_hex(kText), LV_PART_MAIN);
+}
+
+std::string* TerminalUi::input_text_for(lv_obj_t* object)
+{
+    if (object == ssid_input_) {
+        return &ssid_input_text_;
+    }
+    if (object == password_input_) {
+        return &password_input_text_;
+    }
+    if (object == client_id_input_) {
+        return &client_id_input_text_;
+    }
+    if (object == redirect_uri_input_) {
+        return &redirect_uri_input_text_;
+    }
+    if (object == input_) {
+        return &input_text_;
+    }
+    return nullptr;
+}
+
+lv_obj_t* TerminalUi::input_label_for(lv_obj_t* object) const
+{
+    if (object == ssid_input_) {
+        return ssid_input_label_;
+    }
+    if (object == password_input_) {
+        return password_input_label_;
+    }
+    if (object == client_id_input_) {
+        return client_id_input_label_;
+    }
+    if (object == redirect_uri_input_) {
+        return redirect_uri_input_label_;
+    }
+    if (object == input_) {
+        return input_label_;
+    }
+    return nullptr;
+}
+
+const char* TerminalUi::input_placeholder_for(lv_obj_t* object) const
+{
+    if (object == ssid_input_) {
+        return "Office Wi-Fi";
+    }
+    if (object == password_input_) {
+        return "password";
+    }
+    if (object == client_id_input_) {
+        return "OAuth client id";
+    }
+    if (object == redirect_uri_input_) {
+        return "http://tab5-stock.local/oauth/callback";
+    }
+    return "AAPL.US";
+}
+
+bool TerminalUi::input_is_password(lv_obj_t* object) const
+{
+    return object == password_input_;
+}
+
+std::size_t TerminalUi::input_max_length_for(lv_obj_t* object) const
+{
+    if (object == input_) {
+        return kSymbolInputMaxLength;
+    }
+    if (object == ssid_input_ || object == password_input_) {
+        return kWifiInputMaxLength;
+    }
+    return kOAuthInputMaxLength;
+}
+
 void TerminalUi::save_setup_from_controls()
 {
     if (!callbacks_.save_setup || !ssid_input_ || !password_input_ || !client_id_input_
@@ -577,17 +834,14 @@ void TerminalUi::save_setup_from_controls()
     }
 
     settings::WifiCredentials wifi;
-    wifi.ssid = lv_textarea_get_text(ssid_input_);
-    wifi.password = lv_textarea_get_text(password_input_);
+    wifi.ssid = ssid_input_text_;
+    wifi.password = password_input_text_;
 
     const auto endpoint = lv_dropdown_get_selected(endpoint_dropdown_) == 1
         ? longbridge::EndpointRegion::MainlandChina
         : longbridge::EndpointRegion::Global;
 
-    callbacks_.save_setup(wifi,
-                          endpoint,
-                          lv_textarea_get_text(client_id_input_),
-                          lv_textarea_get_text(redirect_uri_input_));
+    callbacks_.save_setup(wifi, endpoint, client_id_input_text_, redirect_uri_input_text_);
 }
 
 void TerminalUi::add_symbol_from_input()
@@ -595,8 +849,9 @@ void TerminalUi::add_symbol_from_input()
     if (!callbacks_.add_symbol || !input_) {
         return;
     }
-    callbacks_.add_symbol(lv_textarea_get_text(input_));
-    lv_textarea_set_text(input_, "");
+    callbacks_.add_symbol(input_text_);
+    input_text_.clear();
+    refresh_input(input_);
 }
 
 } // namespace tab5::ui

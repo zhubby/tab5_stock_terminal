@@ -13,6 +13,7 @@ add_executable(host_tests
     ../../components/longbridge/quote_codec.cpp
     ../../components/quotes/quote_store.cpp
     ../../components/quotes/symbol.cpp
+    ../../components/settings/settings_file.cpp
     test_main.cpp
 )
 
@@ -21,4 +22,5 @@ target_include_directories(host_tests PRIVATE
     ../../components/auth/include
     ../../components/longbridge/include
     ../../components/quotes/include
+    ../../components/settings/include
 )

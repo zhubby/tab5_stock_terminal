@@ -5,6 +5,7 @@
 #include "longbridge/quote_codec.hpp"
 #include "quotes/quote_store.hpp"
 #include "quotes/symbol.hpp"
+#include "settings/settings_file.hpp"
 
 #include <cassert>
 #include <cmath>
@@ -51,6 +52,74 @@ void test_watchlist()
     auto restored = quotes::Watchlist::deserialize(serialized + "\nBAD.LN\n");
     expect(restored.size() == 1, "deserialize ignores invalid symbols");
     expect(restored.symbols().front().value() == "AAPL.US", "deserialize restores symbol");
+}
+
+void test_settings_file()
+{
+    const std::string content = R"CONF(
+# Tab5 boot config
+wifi_ssid = OfficeNet
+wifi_password = pass phrase
+endpoint = cn
+client_id = lb-client-id
+redirect_uri = http://tab5-stock.local/oauth/callback
+watchlist = aapl.us, 700.hk
+symbol = 600519.sh
+access_token = access-1
+refresh_token = refresh-1
+token_expires_at = 1893456000
+)CONF";
+
+    auto parsed = settings::parse_settings_file(content);
+    expect(parsed.ok(), "settings file parses complete config");
+    expect(parsed.settings.wifi.ssid == "OfficeNet", "settings file parses Wi-Fi SSID");
+    expect(parsed.settings.wifi.password == "pass phrase", "settings file parses Wi-Fi password");
+    expect(parsed.settings.endpoint_region == longbridge::EndpointRegion::MainlandChina,
+           "settings file parses endpoint");
+    expect(parsed.settings.longbridge_client_id == "lb-client-id", "settings file parses client id");
+    expect(parsed.settings.oauth_redirect_uri == "http://tab5-stock.local/oauth/callback",
+           "settings file parses redirect URI");
+    expect(parsed.settings.oauth_tokens.access_token == "access-1", "settings file parses access token");
+    expect(parsed.settings.oauth_tokens.refresh_token == "refresh-1", "settings file parses refresh token");
+    expect(parsed.settings.oauth_tokens.expires_at_epoch_s == 1893456000,
+           "settings file parses token expiry");
+    expect(parsed.settings.watchlist.size() == 3, "settings file appends watchlist symbols");
+    expect(parsed.settings.watchlist.symbols()[0].value() == "AAPL.US", "settings file normalizes first symbol");
+    expect(parsed.settings.watchlist.symbols()[1].value() == "700.HK", "settings file normalizes second symbol");
+    expect(parsed.settings.watchlist.symbols()[2].value() == "600519.SH", "settings file normalizes symbol line");
+
+    auto short_keys = settings::parse_settings_file(R"CONF(
+ssid=Lab
+password=
+client_id=client
+watchlist=000001.sz
+)CONF");
+    expect(short_keys.ok(), "settings file supports short keys and blank password");
+    expect(short_keys.settings.endpoint_region == longbridge::EndpointRegion::Global,
+           "settings file defaults endpoint to global");
+    expect(short_keys.settings.watchlist.symbols().front().value() == "000001.SZ",
+           "settings file parses short-key watchlist");
+
+    auto missing = settings::parse_settings_file("wifi_ssid=Lab\nwatchlist=AAPL.US\n");
+    expect(missing.status == settings::SettingsFileStatus::MissingRequired,
+           "settings file rejects missing client id");
+
+    auto invalid_watchlist = settings::parse_settings_file("wifi_ssid=Lab\nclient_id=client\nwatchlist=BAD.LN\n");
+    expect(invalid_watchlist.status == settings::SettingsFileStatus::InvalidWatchlist,
+           "settings file rejects empty normalized watchlist");
+
+    auto invalid_endpoint =
+        settings::parse_settings_file("wifi_ssid=Lab\nclient_id=client\nendpoint=eu\nwatchlist=AAPL.US\n");
+    expect(invalid_endpoint.status == settings::SettingsFileStatus::InvalidEndpoint,
+           "settings file rejects invalid endpoint");
+
+    auto invalid_expiry =
+        settings::parse_settings_file("wifi_ssid=Lab\nclient_id=client\ntoken_expires_at=\nwatchlist=AAPL.US\n");
+    expect(invalid_expiry.ok(), "settings file still imports config with blank token expiry");
+    expect(!invalid_expiry.warnings.empty(), "settings file warns on blank token expiry");
+
+    auto empty = settings::parse_settings_file("# comment only\n\n");
+    expect(empty.status == settings::SettingsFileStatus::Empty, "settings file reports empty content");
 }
 
 void test_quote_store()
@@ -353,6 +422,7 @@ int main()
 {
     test_symbol_normalization();
     test_watchlist();
+    test_settings_file();
     test_quote_store();
     test_oauth_pkce();
     test_protocol_frame();

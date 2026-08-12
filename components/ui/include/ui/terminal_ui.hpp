@@ -3,6 +3,8 @@
 #include "quotes/quote_store.hpp"
 #include "settings/app_settings.hpp"
 
+#include <cstdint>
+#include <cstddef>
 #include <functional>
 #include <string>
 #include <vector>
@@ -67,9 +69,37 @@ private:
     void build_watchlist_table(const std::vector<quotes::QuoteSnapshot>& rows);
     void update_selected_row_from_table();
     void update_detail_text();
+    lv_obj_t* create_input(lv_obj_t* parent,
+                           const char* placeholder,
+                           const std::string& value,
+                           lv_coord_t x,
+                           lv_coord_t y,
+                           lv_coord_t width,
+                           lv_obj_t** object_slot,
+                           lv_obj_t** label_slot,
+                           std::string* text_slot,
+                           bool password = false);
     void add_focus(lv_obj_t* object);
+    void handle_input_key(lv_obj_t* object, std::uint32_t key);
+    void refresh_input(lv_obj_t* object);
+    std::string* input_text_for(lv_obj_t* object);
+    lv_obj_t* input_label_for(lv_obj_t* object) const;
+    const char* input_placeholder_for(lv_obj_t* object) const;
+    bool input_is_password(lv_obj_t* object) const;
+    std::size_t input_max_length_for(lv_obj_t* object) const;
     void save_setup_from_controls();
     void add_symbol_from_input();
+
+    lv_obj_t* input_label_ { nullptr };
+    lv_obj_t* ssid_input_label_ { nullptr };
+    lv_obj_t* password_input_label_ { nullptr };
+    lv_obj_t* client_id_input_label_ { nullptr };
+    lv_obj_t* redirect_uri_input_label_ { nullptr };
+    std::string input_text_;
+    std::string ssid_input_text_;
+    std::string password_input_text_;
+    std::string client_id_input_text_;
+    std::string redirect_uri_input_text_;
 };
 
 } // namespace tab5::ui

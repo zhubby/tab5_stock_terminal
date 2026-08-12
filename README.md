@@ -44,6 +44,34 @@ On first boot the setup screen collects:
 - Longbridge OAuth `client_id`
 - OAuth callback URI, defaulting to `http://tab5-stock.local/oauth/callback`
 
+Alternatively, place `TAB5.CFG` or `TAB5.INI` at the root of the Tab5 microSD card. On boot the firmware mounts the SD card, reads the first matching file from `/sdcard`, stores the imported settings in NVS, unmounts the card, and skips the setup form when Wi-Fi, `client_id`, and watchlist are present. Long filenames `tab5_stock_terminal.conf` and `tab5_stock_terminal.ini` are also checked when FATFS long-filename support is enabled, but the 8.3 names are the safest choice on the current firmware defaults.
+
+Example SD card config:
+
+```ini
+# /sdcard/TAB5.CFG
+wifi_ssid=Office Wi-Fi
+wifi_password=your-wifi-password
+endpoint=global
+client_id=your-longbridge-client-id
+redirect_uri=http://tab5-stock.local/oauth/callback
+watchlist=AAPL.US,700.HK,600519.SH,000001.SZ
+```
+
+Supported keys:
+
+- `wifi_ssid` or `ssid`
+- `wifi_password`, `wifi_pass`, or `password`
+- `endpoint`, `endpoint_region`, or `longbridge_endpoint`: `global` or `cn`
+- `client_id` or `longbridge_client_id`
+- `redirect_uri`, `oauth_redirect_uri`, or `callback_uri`
+- `watchlist`: comma-separated symbols
+- `symbol`: one additional symbol per line
+- `reset_tokens=true`: clear existing OAuth tokens while importing
+- `access_token`, `refresh_token`, `token_expires_at`: optional token import for controlled lab use
+
+If the SD card config does not include OAuth tokens, previously stored NVS tokens are preserved only when endpoint, `client_id`, and callback URI still match. Otherwise the watchlist loads and the OAuth button on the watchlist panel starts login.
+
 After saving setup, press OAuth to display the authorization URL/QR. The firmware starts a local callback server on port 80 at `/oauth/callback`, validates the OAuth `state`, exchanges the authorization code with PKCE, and stores the returned access and refresh tokens in NVS.
 
 If Longbridge rejects the LAN callback URI policy for your app, use a temporary callback helper only for authorization-code capture. Quote traffic must remain direct from Tab5 to Longbridge.
@@ -72,6 +100,7 @@ The watchlist caps at 500 symbols to stay aligned with Longbridge quote subscrip
 ## Safety
 
 - Never commit access tokens, refresh tokens, Wi-Fi passwords, App Secrets, or generated `sdkconfig` files.
+- Treat SD card config files as credentials when they include Wi-Fi passwords or OAuth tokens.
 - Use OAuth PKCE rather than embedding Longbridge secrets in firmware.
 - NVS encryption is not enabled by default because the HMAC-backed ESP-IDF scheme can permanently burn an eFuse key on first boot. Enable it deliberately with `idf.py menuconfig` only after choosing the desired key-protection policy for your hardware.
 - The v1 scope is read-only quote data. It intentionally excludes accounts, positions, orders, and trading.
@@ -79,7 +108,7 @@ The watchlist caps at 500 symbols to stay aligned with Longbridge quote subscrip
 
 ## Tests
 
-Portable host tests cover symbol normalization, watchlist behavior, quote merge semantics, PKCE, OAuth callback parsing, protocol frame boundaries, socket quote-pull protobuf fixtures, push quote protobuf fixtures, and reconnect backoff:
+Portable host tests cover symbol normalization, watchlist behavior, SD card settings-file parsing, quote merge semantics, PKCE, OAuth callback parsing, protocol frame boundaries, socket quote-pull protobuf fixtures, push quote protobuf fixtures, and reconnect backoff:
 
 ```bash
 cmake -S tests/host -B build/host-tests
