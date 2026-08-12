@@ -1,0 +1,10 @@
+.DS_Store
+build/
+build-idf54/
+build-host/
+managed_components/
+sdkconfig
+sdkconfig.old
+*.pyc
+__pycache__/
+.cache/
