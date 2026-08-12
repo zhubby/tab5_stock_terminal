@@ -1,5 +1,6 @@
 #include "auth/oauth.hpp"
 #include "auth/oauth_callback_server.hpp"
+#include "longbridge/api_auth.hpp"
 #include "longbridge/endpoint.hpp"
 #include "longbridge/protocol.hpp"
 #include "longbridge/quote_codec.hpp"
@@ -120,6 +121,91 @@ watchlist=000001.sz
 
     auto empty = settings::parse_settings_file("# comment only\n\n");
     expect(empty.status == settings::SettingsFileStatus::Empty, "settings file reports empty content");
+
+    auto api_key = settings::parse_settings_file(R"CONF(
+ssid=Lab
+auth_mode=api_key
+app_key=ap-app-key
+app_secret=ap-app-secret
+access_token=ap-access-token
+watchlist=AAPL.US
+)CONF");
+    expect(api_key.ok(), "settings file parses API key auth config");
+    expect(api_key.settings.auth_mode == settings::AuthMode::ApiKey, "settings file selects API key mode");
+    expect(api_key.settings.api_key.app_key == "ap-app-key", "settings file parses API app key");
+    expect(api_key.settings.api_key.app_secret == "ap-app-secret", "settings file parses API app secret");
+    expect(api_key.settings.api_key.access_token == "ap-access-token",
+           "settings file maps access_token to API key mode");
+    expect(api_key.settings.oauth_tokens.empty(), "settings file does not treat API access_token as OAuth token");
+
+    auto incomplete_api_key = settings::parse_settings_file(R"CONF(
+ssid=Lab
+auth_mode=api_key
+app_key=key
+watchlist=AAPL.US
+)CONF");
+    expect(incomplete_api_key.status == settings::SettingsFileStatus::MissingRequired,
+           "settings file rejects incomplete API key credentials");
+}
+
+void test_api_key_auth_headers()
+{
+    const longbridge::HttpAuthConfig api_auth {
+        longbridge::HttpAuthMode::ApiKey,
+        "",
+        {
+            "test_app_key",
+            "test_app_secret",
+            "test_access_token",
+        },
+    };
+    const auto headers = longbridge::build_longbridge_auth_headers(api_auth,
+                                                                   "GET",
+                                                                   "/v1/socket/token",
+                                                                   "",
+                                                                   "",
+                                                                   1700000000000LL);
+    auto header_value = [&headers](const std::string& name) {
+        for (const auto& header : headers) {
+            if (header.name == name) {
+                return header.value;
+            }
+        }
+        return std::string {};
+    };
+
+    expect(header_value("authorization") == "test_access_token", "API key auth strips bearer prefix");
+    expect(header_value("x-api-key") == "test_app_key", "API key auth sends app key");
+    expect(header_value("x-dc-region") == "ap", "API key auth defaults to AP data center");
+    expect(header_value("x-timestamp") == "1700000000000", "API key auth sends timestamp");
+    expect(header_value("x-api-signature")
+               == "HMAC-SHA256 SignedHeaders=authorization;x-api-key;x-timestamp, Signature="
+                  "6ee4f57c0b56dab539055910d2d41acb5358e07d977034c85ec9acb02ce44a5c",
+           "API key auth matches Longbridge SDK signature format");
+
+    const longbridge::HttpAuthConfig us_auth {
+        longbridge::HttpAuthMode::ApiKey,
+        "",
+        {
+            "us_app_key",
+            "ap_secret",
+            "Bearer ap_access_token",
+        },
+    };
+    const auto us_headers =
+        longbridge::build_longbridge_auth_headers(us_auth, "GET", "/v1/socket/token", "", "", 1700000000000LL);
+    bool saw_us_region = false;
+    bool saw_stripped_token = false;
+    for (const auto& header : us_headers) {
+        if (header.name == "x-dc-region" && header.value == "us") {
+            saw_us_region = true;
+        }
+        if (header.name == "authorization" && header.value == "ap_access_token") {
+            saw_stripped_token = true;
+        }
+    }
+    expect(saw_us_region, "API key auth derives US data center from credential prefix");
+    expect(saw_stripped_token, "API key auth tolerates Bearer-prefixed access token");
 }
 
 void test_quote_store()
@@ -423,6 +509,7 @@ int main()
     test_symbol_normalization();
     test_watchlist();
     test_settings_file();
+    test_api_key_auth_headers();
     test_quote_store();
     test_oauth_pkce();
     test_protocol_frame();

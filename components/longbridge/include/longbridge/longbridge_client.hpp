@@ -1,6 +1,7 @@
 #pragma once
 
 #include "auth/oauth.hpp"
+#include "longbridge/api_auth.hpp"
 #include "longbridge/endpoint.hpp"
 #include "longbridge/protocol.hpp"
 #include "quotes/quote_store.hpp"
@@ -51,6 +52,7 @@ using ClientStateCallback = std::function<void(const std::string&)>;
 struct ClientConfig {
     EndpointSet endpoints;
     std::string access_token;
+    HttpAuthConfig http_auth;
 };
 
 class LongbridgeClient {

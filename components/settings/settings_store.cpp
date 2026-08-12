@@ -14,11 +14,15 @@ constexpr const char* kKeySchema = "schema";
 constexpr const char* kKeyWifiSsid = "wifi_ssid";
 constexpr const char* kKeyWifiPassword = "wifi_pass";
 constexpr const char* kKeyEndpointRegion = "lb_region";
+constexpr const char* kKeyAuthMode = "auth_mode";
 constexpr const char* kKeyClientId = "client_id";
 constexpr const char* kKeyRedirectUri = "redirect";
 constexpr const char* kKeyAccessToken = "access";
 constexpr const char* kKeyRefreshToken = "refresh";
 constexpr const char* kKeyTokenExpiry = "expires";
+constexpr const char* kKeyApiAppKey = "api_key";
+constexpr const char* kKeyApiAppSecret = "api_secret";
+constexpr const char* kKeyApiAccessToken = "api_token";
 constexpr const char* kKeyWatchlist = "watchlist";
 
 #if !defined(TAB5_HOST_TEST)
@@ -83,6 +87,7 @@ esp_err_t SettingsStore::load(AppSettings& settings_out)
     settings_out.wifi.password = get_string(handle, kKeyWifiPassword);
     settings_out.endpoint_region =
         longbridge::endpoint_region_from_string(get_string(handle, kKeyEndpointRegion));
+    settings_out.auth_mode = auth_mode_from_string(get_string(handle, kKeyAuthMode));
     settings_out.longbridge_client_id = get_string(handle, kKeyClientId);
     const auto redirect_uri = get_string(handle, kKeyRedirectUri);
     if (!redirect_uri.empty()) {
@@ -91,6 +96,9 @@ esp_err_t SettingsStore::load(AppSettings& settings_out)
     settings_out.oauth_tokens.access_token = get_string(handle, kKeyAccessToken);
     settings_out.oauth_tokens.refresh_token = get_string(handle, kKeyRefreshToken);
     nvs_get_i64(handle, kKeyTokenExpiry, &settings_out.oauth_tokens.expires_at_epoch_s);
+    settings_out.api_key.app_key = get_string(handle, kKeyApiAppKey);
+    settings_out.api_key.app_secret = get_string(handle, kKeyApiAppSecret);
+    settings_out.api_key.access_token = get_string(handle, kKeyApiAccessToken);
     settings_out.watchlist = quotes::Watchlist::deserialize(get_string(handle, kKeyWatchlist));
 
     nvs_close(handle);
@@ -121,6 +129,9 @@ esp_err_t SettingsStore::save(const AppSettings& settings)
         err = nvs_set_str(handle, kKeyEndpointRegion, longbridge::to_string(settings.endpoint_region).c_str());
     }
     if (err == ESP_OK) {
+        err = nvs_set_str(handle, kKeyAuthMode, to_string(settings.auth_mode));
+    }
+    if (err == ESP_OK) {
         err = nvs_set_str(handle, kKeyClientId, settings.longbridge_client_id.c_str());
     }
     if (err == ESP_OK) {
@@ -134,6 +145,15 @@ esp_err_t SettingsStore::save(const AppSettings& settings)
     }
     if (err == ESP_OK) {
         err = nvs_set_i64(handle, kKeyTokenExpiry, settings.oauth_tokens.expires_at_epoch_s);
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_str(handle, kKeyApiAppKey, settings.api_key.app_key.c_str());
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_str(handle, kKeyApiAppSecret, settings.api_key.app_secret.c_str());
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_str(handle, kKeyApiAccessToken, settings.api_key.access_token.c_str());
     }
     if (err == ESP_OK) {
         const auto serialized_watchlist = settings.watchlist.serialize();

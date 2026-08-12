@@ -130,7 +130,8 @@ std::optional<ClientResult> application_error_from_body(const std::string& body,
 }
 
 ClientResult perform_get(const std::string& url,
-                         const std::string& access_token,
+                         const std::string& path,
+                         const HttpAuthConfig& auth,
                          std::string& body_out,
                          int& status_out)
 {
@@ -149,8 +150,11 @@ ClientResult perform_get(const std::string& url,
         return { ClientError::Network, 0, "failed to initialize HTTP client" };
     }
 
-    std::string authorization = "Bearer " + access_token;
-    esp_http_client_set_header(client, "Authorization", authorization.c_str());
+    const auto auth_headers =
+        build_longbridge_auth_headers(auth, "GET", path, "", "", static_cast<std::int64_t>(std::time(nullptr)) * 1000);
+    for (const auto& header : auth_headers) {
+        esp_http_client_set_header(client, header.name.c_str(), header.value.c_str());
+    }
     esp_http_client_set_header(client, "Accept", "application/json");
 
     const esp_err_t err = esp_http_client_perform(client);
@@ -364,8 +368,9 @@ ClientResult LongbridgeClient::fetch_socket_token(SocketToken& token_out)
 #else
     std::string body;
     int status = 0;
+    constexpr const char* path = "/v1/socket/token";
     const auto result =
-        perform_get(config_.endpoints.rest_base_url + "/v1/socket/token", config_.access_token, body, status);
+        perform_get(config_.endpoints.rest_base_url + path, path, config_.http_auth, body, status);
     if (!result.ok()) {
         return result;
     }

@@ -1061,8 +1061,10 @@ lv_obj_t* initialize_bsp_lvgl_display()
 struct PendingSetup {
     tab5::settings::WifiCredentials wifi;
     tab5::longbridge::EndpointRegion endpoint { tab5::longbridge::EndpointRegion::Global };
+    tab5::settings::AuthMode auth_mode { tab5::settings::AuthMode::OAuth };
     std::string client_id;
     std::string redirect_uri;
+    tab5::settings::LongbridgeApiKeyCredentials api_key;
 };
 
 SemaphoreHandle_t g_action_mutex { nullptr };
@@ -1131,7 +1133,8 @@ std::optional<std::string> read_text_file(const char* path)
 bool auth_settings_match(const tab5::settings::AppSettings& left,
                          const tab5::settings::AppSettings& right)
 {
-    return left.endpoint_region == right.endpoint_region
+    return left.auth_mode == right.auth_mode
+        && left.endpoint_region == right.endpoint_region
         && left.longbridge_client_id == right.longbridge_client_id
         && left.oauth_redirect_uri == right.oauth_redirect_uri;
 }
@@ -1139,10 +1142,16 @@ bool auth_settings_match(const tab5::settings::AppSettings& left,
 void preserve_existing_tokens_if_safe(tab5::settings::SettingsFileResult& parsed,
                                       const tab5::settings::AppSettings& existing)
 {
-    if (parsed.touched_oauth_tokens || parsed.reset_tokens || existing.oauth_tokens.empty()) {
+    if (parsed.settings.auth_mode == tab5::settings::AuthMode::ApiKey) {
+        if (!parsed.touched_api_key_credentials
+            && existing.auth_mode == tab5::settings::AuthMode::ApiKey
+            && existing.api_key.complete()) {
+            parsed.settings.api_key = existing.api_key;
+        }
         return;
     }
-    if (auth_settings_match(parsed.settings, existing)) {
+    if (!parsed.touched_oauth_tokens && !parsed.reset_tokens && !existing.oauth_tokens.empty()
+        && auth_settings_match(parsed.settings, existing)) {
         parsed.settings.oauth_tokens = existing.oauth_tokens;
     }
 }
@@ -2248,11 +2257,44 @@ std::pair<std::vector<tab5::quotes::QuoteDelta>, std::uint32_t> take_quote_delta
     return { deltas, dropped };
 }
 
+bool api_key_mode()
+{
+    return g_settings.auth_mode == tab5::settings::AuthMode::ApiKey;
+}
+
+bool quote_auth_configured()
+{
+    return g_settings.quote_auth_configured();
+}
+
+std::string active_access_token()
+{
+    return api_key_mode() ? g_settings.api_key.access_token : g_settings.oauth_tokens.access_token;
+}
+
+tab5::longbridge::HttpAuthConfig http_auth_config()
+{
+    tab5::longbridge::HttpAuthConfig auth;
+    if (api_key_mode()) {
+        auth.mode = tab5::longbridge::HttpAuthMode::ApiKey;
+        auth.api_key = {
+            g_settings.api_key.app_key,
+            g_settings.api_key.app_secret,
+            g_settings.api_key.access_token,
+        };
+    } else {
+        auth.mode = tab5::longbridge::HttpAuthMode::OAuth;
+        auth.oauth_access_token = g_settings.oauth_tokens.access_token;
+    }
+    return auth;
+}
+
 void configure_longbridge()
 {
     g_longbridge.configure({
         tab5::longbridge::default_endpoints(g_settings.endpoint_region),
-        g_settings.oauth_tokens.access_token,
+        active_access_token(),
+        http_auth_config(),
     });
     g_longbridge.on_state([](const std::string& state) {
         set_connection_status(state);
@@ -2315,6 +2357,12 @@ tab5::auth::OAuthConfig oauth_config()
 
 bool refresh_oauth_if_needed()
 {
+    if (api_key_mode()) {
+        if (std::time(nullptr) <= 1'700'000'000) {
+            wait_for_time_sync();
+        }
+        return g_settings.api_key.complete();
+    }
     if (g_settings.oauth_tokens.empty()) {
         return false;
     }
@@ -2346,6 +2394,9 @@ bool refresh_oauth_if_needed()
 
 bool force_refresh_oauth()
 {
+    if (api_key_mode()) {
+        return false;
+    }
     if (g_settings.oauth_tokens.refresh_token.empty()) {
         return false;
     }
@@ -2466,6 +2517,7 @@ void process_pending_oauth_callback()
     }
 
     g_settings.oauth_tokens = std::move(tokens);
+    g_settings.auth_mode = tab5::settings::AuthMode::OAuth;
     const esp_err_t err = g_settings_store.save(g_settings);
     if (err != ESP_OK) {
         g_ui.set_error(std::string("failed to save OAuth tokens: ") + esp_err_to_name(err));
@@ -2479,8 +2531,10 @@ void process_pending_oauth_callback()
 
 bool refresh_quotes(bool allow_auth_retry)
 {
-    if (g_settings.oauth_tokens.access_token.empty()) {
-        g_ui.set_error("Longbridge OAuth is not connected");
+    if (!quote_auth_configured()) {
+        g_ui.set_error(api_key_mode()
+                           ? "Longbridge API key credentials are incomplete"
+                           : "Longbridge OAuth is not connected");
         return false;
     }
     if (!wifi_is_connected()) {
@@ -2498,7 +2552,8 @@ bool refresh_quotes(bool allow_auth_retry)
     const auto result =
         g_longbridge.fetch_quote_snapshots(g_settings.watchlist.symbols(), snapshots);
     if (!result.ok()) {
-        if (allow_auth_retry && result.error == tab5::longbridge::ClientError::Unauthorized
+        if (!api_key_mode() && allow_auth_retry
+            && result.error == tab5::longbridge::ClientError::Unauthorized
             && force_refresh_oauth()) {
             g_longbridge.disconnect();
             g_quote_stream_online = false;
@@ -2534,7 +2589,7 @@ void schedule_next_quote_refresh(bool last_attempt_ok, std::int64_t now_ms)
         return;
     }
 
-    if (g_settings.oauth_tokens.empty() || !wifi_is_connected()) {
+    if (!quote_auth_configured() || !wifi_is_connected()) {
         g_next_quote_refresh_ms = 0;
         return;
     }
@@ -2612,14 +2667,14 @@ void handle_quote_stream_state(std::int64_t now_ms)
     g_quote_store.mark_all_stale();
     g_ui.set_error("quote stream disconnected; reconnecting");
     redraw_watchlist();
-    if (wifi_is_connected() && !g_settings.oauth_tokens.empty()) {
+    if (wifi_is_connected() && quote_auth_configured()) {
         g_next_quote_refresh_ms = now_ms;
     }
 }
 
 void run_scheduled_quote_refresh(std::int64_t now_ms)
 {
-    if (g_settings.oauth_tokens.empty() || !wifi_is_connected()) {
+    if (!quote_auth_configured() || !wifi_is_connected()) {
         return;
     }
     if (g_next_quote_refresh_ms == 0) {
@@ -2633,6 +2688,10 @@ void run_scheduled_quote_refresh(std::int64_t now_ms)
 
 void show_oauth_flow()
 {
+    if (api_key_mode()) {
+        g_ui.set_error("switch auth mode to OAuth before starting OAuth login");
+        return;
+    }
     if (g_settings.longbridge_client_id.empty()) {
         g_ui.set_error("save Longbridge client_id before OAuth");
         return;
@@ -2662,17 +2721,28 @@ void handle_setup_save(PendingSetup setup)
     const bool endpoint_changed = setup.endpoint != g_settings.endpoint_region;
     const std::string next_redirect_uri =
         setup.redirect_uri.empty() ? g_settings.oauth_redirect_uri : setup.redirect_uri;
-    const bool auth_config_changed = endpoint_changed
+    const bool oauth_config_changed = endpoint_changed
+        || setup.auth_mode != g_settings.auth_mode
         || setup.client_id != g_settings.longbridge_client_id
         || next_redirect_uri != g_settings.oauth_redirect_uri;
+    const bool api_key_config_changed =
+        setup.auth_mode != g_settings.auth_mode
+        || setup.api_key.app_key != g_settings.api_key.app_key
+        || setup.api_key.app_secret != g_settings.api_key.app_secret
+        || setup.api_key.access_token != g_settings.api_key.access_token;
+    const bool auth_config_changed = oauth_config_changed || api_key_config_changed;
 
     g_settings.wifi = std::move(setup.wifi);
     g_settings.endpoint_region = setup.endpoint;
+    g_settings.auth_mode = setup.auth_mode;
     g_settings.longbridge_client_id = std::move(setup.client_id);
     g_settings.oauth_redirect_uri = std::move(next_redirect_uri);
+    g_settings.api_key = std::move(setup.api_key);
     if (auth_config_changed) {
         clear_oauth_attempt();
-        g_settings.oauth_tokens = {};
+        if (api_key_mode() || (g_settings.auth_mode == tab5::settings::AuthMode::OAuth && oauth_config_changed)) {
+            g_settings.oauth_tokens = {};
+        }
         g_longbridge.disconnect();
         g_quote_stream_online = false;
         g_stream_watchlist_key.clear();
@@ -2686,7 +2756,7 @@ void handle_setup_save(PendingSetup setup)
     if (g_settings.wifi.complete()) {
         if (start_wifi_sta(g_settings.wifi)) {
             set_connection_status("wifi connected");
-            if (!g_settings.oauth_tokens.empty()) {
+            if (quote_auth_configured()) {
                 refresh_quotes_and_schedule();
             }
         } else {
@@ -2803,13 +2873,17 @@ tab5::ui::TerminalUiCallbacks callbacks()
     callbacks.save_setup =
         [](tab5::settings::WifiCredentials wifi,
            tab5::longbridge::EndpointRegion endpoint,
+           tab5::settings::AuthMode auth_mode,
            std::string client_id,
-           std::string redirect_uri) {
+           std::string redirect_uri,
+           tab5::settings::LongbridgeApiKeyCredentials api_key) {
             queue_setup_save({
                 std::move(wifi),
                 endpoint,
+                auth_mode,
                 std::move(client_id),
                 std::move(redirect_uri),
+                std::move(api_key),
             });
         };
 

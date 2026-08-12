@@ -9,6 +9,7 @@ add_executable(host_tests
     ../../components/auth/oauth_callback_server.cpp
     ../../components/auth/sha256.cpp
     ../../components/longbridge/endpoint.cpp
+    ../../components/longbridge/api_auth.cpp
     ../../components/longbridge/protocol.cpp
     ../../components/longbridge/quote_codec.cpp
     ../../components/quotes/quote_store.cpp

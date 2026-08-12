@@ -21,6 +21,7 @@ struct SettingsFileResult {
     AppSettings settings;
     std::vector<std::string> warnings;
     bool touched_oauth_tokens { false };
+    bool touched_api_key_credentials { false };
     bool reset_tokens { false };
 
     bool ok() const { return status == SettingsFileStatus::Ok; }

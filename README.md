@@ -4,9 +4,9 @@ Read-only stock quote terminal for M5Stack Tab5 with keyboard kit. The firmware 
 
 ## Status
 
-This repo now contains the ESP-IDF project scaffold, domain model, settings persistence, OAuth PKCE flow, local OAuth callback server, Longbridge socket-token client, Longbridge quote WebSocket client, Longbridge v1 frame/quote protobuf payload codec, LVGL terminal UI, and host unit tests for the portable core logic.
+This repo now contains the ESP-IDF project scaffold, domain model, settings persistence, OAuth PKCE flow, API Key auth, local OAuth callback server, Longbridge socket-token client, Longbridge quote WebSocket client, Longbridge v1 frame/quote protobuf payload codec, LVGL terminal UI, and host unit tests for the portable core logic.
 
-The runtime path opens the quote WebSocket with `/v1/socket/token`, sends AUTH, pulls full snapshots with the socket `QuotePull` command, subscribes with `SubType.Quote`, and merges sparse `PushQuoteData` updates into the local quote store. Real Tab5 boot validation has passed through PSRAM initialization, ESP-Hosted SDIO startup, LVGL landscape setup, and USB HID keyboard initialization. The remaining validation gap is Longbridge account testing with OAuth and quote permissions enabled.
+The runtime path opens the quote WebSocket with `/v1/socket/token`, sends AUTH, pulls full snapshots with the socket `QuotePull` command, subscribes with `SubType.Quote`, and merges sparse `PushQuoteData` updates into the local quote store. Real Tab5 boot validation has passed through PSRAM initialization, ESP-Hosted SDIO startup, LVGL landscape setup, and USB HID keyboard initialization. The remaining validation gap is Longbridge account testing with OAuth or API Key credentials and quote permissions enabled.
 
 ## Hardware And Toolchain
 
@@ -41,10 +41,11 @@ On first boot the setup screen collects:
 
 - Wi-Fi SSID and password
 - Longbridge endpoint region: `global` or `cn`
-- Longbridge OAuth `client_id`
-- OAuth callback URI, defaulting to `http://tab5-stock.local/oauth/callback`
+- Auth mode: `OAuth` or `API key`
+- OAuth mode: Longbridge OAuth `client_id` and callback URI
+- API Key mode: Longbridge `app_key`, `app_secret`, and `access_token`
 
-Alternatively, place `TAB5.CFG` or `TAB5.INI` at the root of the Tab5 microSD card. On boot the firmware mounts the SD card, reads the first matching file from `/sdcard`, stores the imported settings in NVS, unmounts the card, and skips the setup form when Wi-Fi, `client_id`, and watchlist are present. Long filenames `tab5_stock_terminal.conf` and `tab5_stock_terminal.ini` are also checked when FATFS long-filename support is enabled, but the 8.3 names are the safest choice on the current firmware defaults.
+Alternatively, place `TAB5.CFG` or `TAB5.INI` at the root of the Tab5 microSD card. On boot the firmware mounts the SD card, reads the first matching file from `/sdcard`, stores the imported settings in NVS, unmounts the card, and skips the setup form when Wi-Fi, quote auth credentials, and watchlist are present. Long filenames `tab5_stock_terminal.conf` and `tab5_stock_terminal.ini` are also checked when FATFS long-filename support is enabled, but the 8.3 names are the safest choice on the current firmware defaults.
 
 Example SD card config:
 
@@ -58,25 +59,46 @@ redirect_uri=http://tab5-stock.local/oauth/callback
 watchlist=AAPL.US,700.HK,600519.SH,000001.SZ
 ```
 
+API Key SD card config:
+
+```ini
+# /sdcard/TAB5.CFG
+wifi_ssid=Office Wi-Fi
+wifi_password=your-wifi-password
+endpoint=global
+auth_mode=api_key
+app_key=your-longbridge-app-key
+app_secret=your-longbridge-app-secret
+access_token=your-longbridge-access-token
+watchlist=AAPL.US,700.HK,600519.SH,000001.SZ
+```
+
 Supported keys:
 
 - `wifi_ssid` or `ssid`
 - `wifi_password`, `wifi_pass`, or `password`
 - `endpoint`, `endpoint_region`, or `longbridge_endpoint`: `global` or `cn`
+- `auth_mode`, `auth`, or `longbridge_auth`: `oauth` or `api_key`
 - `client_id` or `longbridge_client_id`
 - `redirect_uri`, `oauth_redirect_uri`, or `callback_uri`
+- `app_key`, `longbridge_app_key`, or `api_app_key`
+- `app_secret`, `longbridge_app_secret`, or `api_app_secret`
+- `api_access_token`, `api_token`, or `longbridge_access_token`
 - `watchlist`: comma-separated symbols
 - `symbol`: one additional symbol per line
 - `reset_tokens=true`: clear existing OAuth tokens while importing
-- `access_token`, `refresh_token`, `token_expires_at`: optional token import for controlled lab use
+- `access_token`: OAuth access token in OAuth mode, or API Key access token when `auth_mode=api_key`
+- `refresh_token`, `token_expires_at`: optional OAuth token import for controlled lab use
 
-If the SD card config does not include OAuth tokens, previously stored NVS tokens are preserved only when endpoint, `client_id`, and callback URI still match. Otherwise the watchlist loads and the OAuth button on the watchlist panel starts login.
+If the SD card config does not include OAuth tokens, previously stored NVS tokens are preserved only when endpoint, auth mode, `client_id`, and callback URI still match. In API Key mode, existing NVS API Key credentials are preserved when the SD card selects API Key mode but omits the credential fields.
 
 After saving setup, press OAuth to display the authorization URL/QR. The firmware starts a local callback server on port 80 at `/oauth/callback`, validates the OAuth `state`, exchanges the authorization code with PKCE, and stores the returned access and refresh tokens in NVS.
 
+In API Key mode, quote startup skips OAuth entirely. The firmware signs the `/v1/socket/token` request with the Longbridge SDK-compatible HMAC-SHA256 headers: `authorization`, `x-api-key`, `x-dc-region`, `x-timestamp`, and `x-api-signature`.
+
 If Longbridge rejects the LAN callback URI policy for your app, use a temporary callback helper only for authorization-code capture. Quote traffic must remain direct from Tab5 to Longbridge.
 
-Changing the Longbridge endpoint, OAuth `client_id`, or callback URI clears stored OAuth tokens and requires login again. Use the keyboard-focusable Reset control to factory-reset Wi-Fi, OAuth tokens, endpoint choice, and watchlist settings.
+Changing the Longbridge endpoint, auth mode, OAuth `client_id`, callback URI, or API Key credentials disconnects the quote stream and clears stale auth state. Use the keyboard-focusable Reset control to factory-reset Wi-Fi, OAuth tokens, API Key credentials, endpoint choice, and watchlist settings.
 
 The default endpoints follow the current Longbridge documentation:
 
@@ -100,15 +122,15 @@ The watchlist caps at 500 symbols to stay aligned with Longbridge quote subscrip
 ## Safety
 
 - Never commit access tokens, refresh tokens, Wi-Fi passwords, App Secrets, or generated `sdkconfig` files.
-- Treat SD card config files as credentials when they include Wi-Fi passwords or OAuth tokens.
-- Use OAuth PKCE rather than embedding Longbridge secrets in firmware.
+- Treat SD card config files as credentials when they include Wi-Fi passwords, OAuth tokens, API access tokens, or App Secrets.
+- OAuth PKCE avoids embedding App Secrets in firmware. API Key mode is supported for local/private devices, but stores `app_secret` on-device.
 - NVS encryption is not enabled by default because the HMAC-backed ESP-IDF scheme can permanently burn an eFuse key on first boot. Enable it deliberately with `idf.py menuconfig` only after choosing the desired key-protection policy for your hardware.
 - The v1 scope is read-only quote data. It intentionally excludes accounts, positions, orders, and trading.
 - Market availability depends on the Longbridge account's OpenAPI and quote permissions.
 
 ## Tests
 
-Portable host tests cover symbol normalization, watchlist behavior, SD card settings-file parsing, quote merge semantics, PKCE, OAuth callback parsing, protocol frame boundaries, socket quote-pull protobuf fixtures, push quote protobuf fixtures, and reconnect backoff:
+Portable host tests cover symbol normalization, watchlist behavior, SD card settings-file parsing, API Key signing, quote merge semantics, PKCE, OAuth callback parsing, protocol frame boundaries, socket quote-pull protobuf fixtures, push quote protobuf fixtures, and reconnect backoff:
 
 ```bash
 cmake -S tests/host -B build/host-tests

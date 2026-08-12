@@ -117,12 +117,17 @@ void apply_key_value(SettingsFileResult& result,
         settings.wifi.password = clean_value;
     } else if (normalized == "endpoint" || normalized == "endpoint_region" || normalized == "longbridge_endpoint") {
         settings.endpoint_region = longbridge::endpoint_region_from_string(clean_value);
+    } else if (normalized == "auth_mode" || normalized == "auth" || normalized == "longbridge_auth") {
+        settings.auth_mode = auth_mode_from_string(clean_value);
     } else if (normalized == "client_id" || normalized == "longbridge_client_id") {
         settings.longbridge_client_id = clean_value;
     } else if (normalized == "redirect_uri" || normalized == "oauth_redirect_uri" || normalized == "callback_uri") {
         if (!clean_value.empty()) {
             settings.oauth_redirect_uri = clean_value;
         }
+    } else if (normalized == "access_token" && settings.auth_mode == AuthMode::ApiKey) {
+        result.touched_api_key_credentials = true;
+        settings.api_key.access_token = clean_value;
     } else if (normalized == "access_token" || normalized == "oauth_access_token") {
         result.touched_oauth_tokens = true;
         settings.oauth_tokens.access_token = clean_value;
@@ -137,6 +142,19 @@ void apply_key_value(SettingsFileResult& result,
         } else {
             result.warnings.push_back("ignored invalid token expiry: " + clean_value);
         }
+    } else if (normalized == "app_key" || normalized == "longbridge_app_key" || normalized == "api_app_key") {
+        result.touched_api_key_credentials = true;
+        settings.auth_mode = AuthMode::ApiKey;
+        settings.api_key.app_key = clean_value;
+    } else if (normalized == "app_secret" || normalized == "longbridge_app_secret" || normalized == "api_app_secret") {
+        result.touched_api_key_credentials = true;
+        settings.auth_mode = AuthMode::ApiKey;
+        settings.api_key.app_secret = clean_value;
+    } else if (normalized == "api_access_token" || normalized == "api_token"
+               || normalized == "longbridge_access_token") {
+        result.touched_api_key_credentials = true;
+        settings.auth_mode = AuthMode::ApiKey;
+        settings.api_key.access_token = clean_value;
     } else if (normalized == "watchlist") {
         if (!append_watchlist) {
             settings.watchlist.clear();
@@ -157,7 +175,13 @@ void apply_key_value(SettingsFileResult& result,
 
 bool required_present(const AppSettings& settings)
 {
-    return settings.wifi.complete() && !settings.longbridge_client_id.empty() && !settings.watchlist.empty();
+    if (!settings.wifi.complete() || settings.watchlist.empty()) {
+        return false;
+    }
+    if (settings.auth_mode == AuthMode::ApiKey) {
+        return settings.api_key.complete();
+    }
+    return !settings.longbridge_client_id.empty();
 }
 
 } // namespace
@@ -194,6 +218,14 @@ SettingsFileResult parse_settings_file(const std::string& content)
         const std::string key = clean.substr(0, equals);
         const std::string normalized = normalized_key(key);
         const std::string value = trim(clean.substr(equals + 1));
+        if (normalized == "auth_mode" || normalized == "auth" || normalized == "longbridge_auth") {
+            const auto auth_mode = auth_mode_from_string(value);
+            if (lower(value) != "oauth" && auth_mode == AuthMode::OAuth) {
+                result.warnings.push_back("unknown auth mode; using oauth: " + value);
+            }
+            result.settings.auth_mode = auth_mode;
+            continue;
+        }
         if (normalized == "endpoint" || normalized == "endpoint_region" || normalized == "longbridge_endpoint") {
             const auto endpoint = parse_endpoint_region(value);
             if (!endpoint) {
@@ -214,6 +246,13 @@ SettingsFileResult parse_settings_file(const std::string& content)
     if (invalid_endpoint) {
         result.status = SettingsFileStatus::InvalidEndpoint;
         return result;
+    }
+    if (result.settings.auth_mode == AuthMode::ApiKey && result.settings.api_key.access_token.empty()
+        && !result.settings.oauth_tokens.access_token.empty() && result.settings.oauth_tokens.refresh_token.empty()) {
+        result.settings.api_key.access_token = result.settings.oauth_tokens.access_token;
+        result.settings.oauth_tokens.access_token.clear();
+        result.touched_api_key_credentials = true;
+        result.touched_oauth_tokens = false;
     }
     if (result.settings.watchlist.empty()) {
         result.status = SettingsFileStatus::InvalidWatchlist;
