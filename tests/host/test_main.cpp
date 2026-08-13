@@ -1,5 +1,3 @@
-#include "auth/oauth.hpp"
-#include "auth/oauth_callback_server.hpp"
 #include "longbridge/api_auth.hpp"
 #include "longbridge/endpoint.hpp"
 #include "longbridge/protocol.hpp"
@@ -63,13 +61,11 @@ void test_settings_file()
 wifi_ssid = OfficeNet
 wifi_password = pass phrase
 endpoint = cn
-client_id = lb-client-id
-redirect_uri = http://tab5-stock.local/oauth/callback
+app_key = lb-app-key
+app_secret = lb-app-secret
 watchlist = aapl.us, 700.hk
 symbol = 600519.sh
 access_token = access-1
-refresh_token = refresh-1
-token_expires_at = 1893456000
 )CONF";
 
     auto parsed = settings::parse_settings_file(content);
@@ -78,13 +74,9 @@ token_expires_at = 1893456000
     expect(parsed.settings.wifi.password == "pass phrase", "settings file parses Wi-Fi password");
     expect(parsed.settings.endpoint_region == longbridge::EndpointRegion::MainlandChina,
            "settings file parses endpoint");
-    expect(parsed.settings.longbridge_client_id == "lb-client-id", "settings file parses client id");
-    expect(parsed.settings.oauth_redirect_uri == "http://tab5-stock.local/oauth/callback",
-           "settings file parses redirect URI");
-    expect(parsed.settings.oauth_tokens.access_token == "access-1", "settings file parses access token");
-    expect(parsed.settings.oauth_tokens.refresh_token == "refresh-1", "settings file parses refresh token");
-    expect(parsed.settings.oauth_tokens.expires_at_epoch_s == 1893456000,
-           "settings file parses token expiry");
+    expect(parsed.settings.api_key.app_key == "lb-app-key", "settings file parses API app key");
+    expect(parsed.settings.api_key.app_secret == "lb-app-secret", "settings file parses API app secret");
+    expect(parsed.settings.api_key.access_token == "access-1", "settings file parses API access token");
     expect(parsed.settings.watchlist.size() == 3, "settings file appends watchlist symbols");
     expect(parsed.settings.watchlist.symbols()[0].value() == "AAPL.US", "settings file normalizes first symbol");
     expect(parsed.settings.watchlist.symbols()[1].value() == "700.HK", "settings file normalizes second symbol");
@@ -93,7 +85,9 @@ token_expires_at = 1893456000
     auto short_keys = settings::parse_settings_file(R"CONF(
 ssid=Lab
 password=
-client_id=client
+app_key=key
+app_secret=secret
+api_token=token
 watchlist=000001.sz
 )CONF");
     expect(short_keys.ok(), "settings file supports short keys and blank password");
@@ -104,44 +98,53 @@ watchlist=000001.sz
 
     auto missing = settings::parse_settings_file("wifi_ssid=Lab\nwatchlist=AAPL.US\n");
     expect(missing.status == settings::SettingsFileStatus::MissingRequired,
-           "settings file rejects missing client id");
+           "settings file rejects missing API key credentials");
 
-    auto invalid_watchlist = settings::parse_settings_file("wifi_ssid=Lab\nclient_id=client\nwatchlist=BAD.LN\n");
+    auto invalid_watchlist =
+        settings::parse_settings_file("wifi_ssid=Lab\napp_key=key\napp_secret=secret\napi_token=token\nwatchlist=BAD.LN\n");
     expect(invalid_watchlist.status == settings::SettingsFileStatus::InvalidWatchlist,
            "settings file rejects empty normalized watchlist");
 
     auto invalid_endpoint =
-        settings::parse_settings_file("wifi_ssid=Lab\nclient_id=client\nendpoint=eu\nwatchlist=AAPL.US\n");
+        settings::parse_settings_file("wifi_ssid=Lab\napp_key=key\napp_secret=secret\napi_token=token\nendpoint=eu\nwatchlist=AAPL.US\n");
     expect(invalid_endpoint.status == settings::SettingsFileStatus::InvalidEndpoint,
            "settings file rejects invalid endpoint");
 
-    auto invalid_expiry =
-        settings::parse_settings_file("wifi_ssid=Lab\nclient_id=client\ntoken_expires_at=\nwatchlist=AAPL.US\n");
-    expect(invalid_expiry.ok(), "settings file still imports config with blank token expiry");
-    expect(!invalid_expiry.warnings.empty(), "settings file warns on blank token expiry");
+    auto legacy_oauth =
+        settings::parse_settings_file("wifi_ssid=Lab\napp_key=key\napp_secret=secret\napi_token=token\nclient_id=client\nrefresh_token=old\nwatchlist=AAPL.US\n");
+    expect(legacy_oauth.ok(), "settings file ignores legacy OAuth keys when API token is present");
+    expect(!legacy_oauth.warnings.empty(), "settings file warns on ignored OAuth keys");
 
     auto empty = settings::parse_settings_file("# comment only\n\n");
     expect(empty.status == settings::SettingsFileStatus::Empty, "settings file reports empty content");
 
     auto api_key = settings::parse_settings_file(R"CONF(
 ssid=Lab
-auth_mode=api_key
 app_key=ap-app-key
 app_secret=ap-app-secret
 access_token=ap-access-token
 watchlist=AAPL.US
 )CONF");
     expect(api_key.ok(), "settings file parses API key auth config");
-    expect(api_key.settings.auth_mode == settings::AuthMode::ApiKey, "settings file selects API key mode");
     expect(api_key.settings.api_key.app_key == "ap-app-key", "settings file parses API app key");
     expect(api_key.settings.api_key.app_secret == "ap-app-secret", "settings file parses API app secret");
     expect(api_key.settings.api_key.access_token == "ap-access-token",
            "settings file maps access_token to API key mode");
-    expect(api_key.settings.oauth_tokens.empty(), "settings file does not treat API access_token as OAuth token");
+
+    auto legacy_oauth_access = settings::parse_settings_file(R"CONF(
+ssid=Lab
+auth_mode=oauth
+access_token=legacy-oauth-access
+refresh_token=legacy-oauth-refresh
+watchlist=AAPL.US
+)CONF");
+    expect(legacy_oauth_access.status == settings::SettingsFileStatus::MissingRequired,
+           "settings file ignores bare access_token in legacy OAuth mode");
+    expect(!legacy_oauth_access.touched_api_key_credentials,
+           "legacy OAuth access_token does not block existing API key preservation");
 
     auto incomplete_api_key = settings::parse_settings_file(R"CONF(
 ssid=Lab
-auth_mode=api_key
 app_key=key
 watchlist=AAPL.US
 )CONF");
@@ -220,14 +223,10 @@ void test_sd_file_manager_helpers()
 
 void test_api_key_auth_headers()
 {
-    const longbridge::HttpAuthConfig api_auth {
-        longbridge::HttpAuthMode::ApiKey,
-        "",
-        {
-            "test_app_key",
-            "test_app_secret",
-            "test_access_token",
-        },
+    const longbridge::ApiKeyCredentials api_auth {
+        "test_app_key",
+        "test_app_secret",
+        "test_access_token",
     };
     const auto headers = longbridge::build_longbridge_auth_headers(api_auth,
                                                                    "GET",
@@ -253,14 +252,10 @@ void test_api_key_auth_headers()
                   "6ee4f57c0b56dab539055910d2d41acb5358e07d977034c85ec9acb02ce44a5c",
            "API key auth matches Longbridge SDK signature format");
 
-    const longbridge::HttpAuthConfig us_auth {
-        longbridge::HttpAuthMode::ApiKey,
-        "",
-        {
-            "us_app_key",
-            "ap_secret",
-            "Bearer ap_access_token",
-        },
+    const longbridge::ApiKeyCredentials us_auth {
+        "us_app_key",
+        "ap_secret",
+        "Bearer ap_access_token",
     };
     const auto us_headers =
         longbridge::build_longbridge_auth_headers(us_auth, "GET", "/v1/socket/token", "", "", 1700000000000LL);
@@ -358,47 +353,6 @@ void test_quote_store()
     expect(still_newer.sequence.value() == 12, "older pending delta does not lower sequence");
 }
 
-void test_oauth_pkce()
-{
-    const std::string verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
-    const std::string expected = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
-    expect(auth::pkce_challenge_for_verifier(verifier) == expected, "RFC7636 PKCE vector");
-
-    auth::OAuthConfig config {
-        "https://openapi.longbridge.com/oauth2/authorize",
-        "https://openapi.longbridge.com/oauth2/token",
-        "client id",
-        "http://tab5.local/oauth/callback",
-        "3",
-    };
-    const auto url = auth::build_authorization_url(config, "state 1", "challenge");
-    expect(url.find("response_type=code") != std::string::npos, "authorization URL response type");
-    expect(url.find("client_id=client%20id") != std::string::npos, "authorization URL encodes client_id");
-    expect(url.find("code_challenge_method=S256") != std::string::npos, "authorization URL uses S256");
-
-    const auto callback =
-        auth::parse_oauth_callback_query("?code=abc%20123&state=state+1");
-    expect(callback.has_code(), "callback code parsed");
-    expect(callback.code == "abc 123", "callback code URL decoded");
-    expect(callback.state == "state 1", "callback state URL decoded");
-
-    const auto denied = auth::parse_oauth_callback_query("?error=access_denied&state=state");
-    expect(!denied.has_code(), "callback with error rejected as code-bearing callback");
-
-    auth::OAuthCallbackServer server;
-    int accepted = 0;
-    expect(server.start(80,
-                        "state 1",
-                        [&accepted](const auth::OAuthCallbackParams&) {
-                            ++accepted;
-                        }),
-           "host callback server starts logical callback gate");
-    expect(!server.handle_query("?code=abc&state=wrong"), "wrong callback state rejected");
-    expect(server.handle_query("?code=abc&state=state+1"), "right callback accepted");
-    expect(!server.handle_query("?code=abc&state=state+1"), "callback is one-shot");
-    expect(accepted == 1, "callback handler called once");
-}
-
 void test_protocol_frame()
 {
     longbridge::WireFrame frame;
@@ -461,8 +415,6 @@ void test_longbridge_endpoints()
     const auto global = longbridge::default_endpoints(longbridge::EndpointRegion::Global);
     expect(global.rest_base_url == "https://openapi.longbridge.com", "global REST endpoint");
     expect(global.quote_ws_url == "wss://openapi-quote.longbridge.com", "global quote WebSocket endpoint");
-    expect(global.authorize_url == "https://openapi.longbridge.com/oauth2/authorize", "global OAuth authorize endpoint");
-    expect(global.token_url == "https://openapi.longbridge.com/oauth2/token", "global OAuth token endpoint");
 
     const auto cn = longbridge::default_endpoints(longbridge::EndpointRegion::MainlandChina);
     expect(cn.rest_base_url == "https://openapi.longbridge.cn", "cn REST endpoint");
@@ -582,7 +534,6 @@ int main()
     test_sd_file_manager_helpers();
     test_api_key_auth_headers();
     test_quote_store();
-    test_oauth_pkce();
     test_protocol_frame();
     test_longbridge_endpoints();
     test_quote_codec();

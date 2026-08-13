@@ -205,7 +205,7 @@ std::string dc_region_from_credentials(const std::vector<std::string>& credentia
     return "ap";
 }
 
-std::vector<HttpHeader> build_longbridge_auth_headers(const HttpAuthConfig& auth,
+std::vector<HttpHeader> build_longbridge_auth_headers(const ApiKeyCredentials& credentials,
                                                       const std::string& method,
                                                       const std::string& path,
                                                       const std::string& query,
@@ -213,30 +213,23 @@ std::vector<HttpHeader> build_longbridge_auth_headers(const HttpAuthConfig& auth
                                                       std::int64_t timestamp_ms)
 {
     std::vector<HttpHeader> headers;
-    if (auth.mode == HttpAuthMode::ApiKey) {
-        const std::string app_key = strip_bearer_prefix(auth.api_key.app_key);
-        const std::string access_token = strip_bearer_prefix(auth.api_key.access_token);
-        const std::string timestamp = std::to_string(timestamp_ms);
-        headers.push_back({ "authorization", access_token });
-        headers.push_back({ "x-api-key", app_key });
-        headers.push_back({ "x-dc-region",
-                            dc_region_from_credentials({
-                                auth.api_key.app_key,
-                                auth.api_key.app_secret,
-                                auth.api_key.access_token,
-                            }) });
-        headers.push_back({ "x-timestamp", timestamp });
-        headers.push_back({
-            "x-api-signature",
-            std::string("HMAC-SHA256 SignedHeaders=") + kSignedHeaders + ", Signature="
-                + api_signature(auth.api_key, method, path, query, body, timestamp_ms),
-        });
-        return headers;
-    }
-
-    const std::string access_token = strip_bearer_prefix(auth.oauth_access_token);
-    headers.push_back({ "Authorization", "Bearer " + access_token });
-    headers.push_back({ "x-dc-region", dc_region_from_credentials({ access_token }) });
+    const std::string app_key = strip_bearer_prefix(credentials.app_key);
+    const std::string access_token = strip_bearer_prefix(credentials.access_token);
+    const std::string timestamp = std::to_string(timestamp_ms);
+    headers.push_back({ "authorization", access_token });
+    headers.push_back({ "x-api-key", app_key });
+    headers.push_back({ "x-dc-region",
+                        dc_region_from_credentials({
+                            credentials.app_key,
+                            credentials.app_secret,
+                            credentials.access_token,
+                        }) });
+    headers.push_back({ "x-timestamp", timestamp });
+    headers.push_back({
+        "x-api-signature",
+        std::string("HMAC-SHA256 SignedHeaders=") + kSignedHeaders + ", Signature="
+            + api_signature(credentials, method, path, query, body, timestamp_ms),
+    });
     return headers;
 }
 

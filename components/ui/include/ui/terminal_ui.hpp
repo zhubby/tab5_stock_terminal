@@ -15,19 +15,14 @@ namespace tab5::ui {
 
 enum class UiMode {
     Setup,
-    OAuth,
     Watchlist,
 };
 
 struct TerminalUiCallbacks {
     std::function<void(settings::WifiCredentials,
                        longbridge::EndpointRegion,
-                       settings::AuthMode,
-                       std::string,
-                       std::string,
                        settings::LongbridgeApiKeyCredentials)>
         save_setup;
-    std::function<void()> start_oauth;
     std::function<void(const std::string&)> add_symbol;
     std::function<void(std::size_t)> remove_symbol_at;
     std::function<void()> refresh_quotes;
@@ -38,7 +33,6 @@ class TerminalUi {
 public:
     void init(lv_obj_t* screen, TerminalUiCallbacks callbacks = {});
     void show_setup(const settings::AppSettings& settings);
-    void show_oauth_url(const std::string& url);
     void show_watchlist(const std::vector<quotes::QuoteSnapshot>& rows);
     void set_connection_status(const std::string& status);
     void set_error(const std::string& error);
@@ -58,9 +52,6 @@ private:
     lv_obj_t* input_ { nullptr };
     lv_obj_t* ssid_input_ { nullptr };
     lv_obj_t* password_input_ { nullptr };
-    lv_obj_t* auth_mode_dropdown_ { nullptr };
-    lv_obj_t* client_id_input_ { nullptr };
-    lv_obj_t* redirect_uri_input_ { nullptr };
     lv_obj_t* api_app_key_input_ { nullptr };
     lv_obj_t* api_app_secret_input_ { nullptr };
     lv_obj_t* api_access_token_input_ { nullptr };
@@ -99,16 +90,12 @@ private:
     lv_obj_t* input_label_ { nullptr };
     lv_obj_t* ssid_input_label_ { nullptr };
     lv_obj_t* password_input_label_ { nullptr };
-    lv_obj_t* client_id_input_label_ { nullptr };
-    lv_obj_t* redirect_uri_input_label_ { nullptr };
     lv_obj_t* api_app_key_input_label_ { nullptr };
     lv_obj_t* api_app_secret_input_label_ { nullptr };
     lv_obj_t* api_access_token_input_label_ { nullptr };
     std::string input_text_;
     std::string ssid_input_text_;
     std::string password_input_text_;
-    std::string client_id_input_text_;
-    std::string redirect_uri_input_text_;
     std::string api_app_key_input_text_;
     std::string api_app_secret_input_text_;
     std::string api_access_token_input_text_;

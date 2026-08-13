@@ -3,7 +3,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cstring>
 #include <ctime>
 #include <sstream>
 
@@ -131,7 +130,7 @@ std::optional<ClientResult> application_error_from_body(const std::string& body,
 
 ClientResult perform_get(const std::string& url,
                          const std::string& path,
-                         const HttpAuthConfig& auth,
+                         const ApiKeyCredentials& credentials,
                          std::string& body_out,
                          int& status_out)
 {
@@ -151,54 +150,11 @@ ClientResult perform_get(const std::string& url,
     }
 
     const auto auth_headers =
-        build_longbridge_auth_headers(auth, "GET", path, "", "", static_cast<std::int64_t>(std::time(nullptr)) * 1000);
+        build_longbridge_auth_headers(credentials, "GET", path, "", "", static_cast<std::int64_t>(std::time(nullptr)) * 1000);
     for (const auto& header : auth_headers) {
         esp_http_client_set_header(client, header.name.c_str(), header.value.c_str());
     }
     esp_http_client_set_header(client, "Accept", "application/json");
-
-    const esp_err_t err = esp_http_client_perform(client);
-    status_out = esp_http_client_get_status_code(client);
-    esp_http_client_cleanup(client);
-
-    if (err != ESP_OK) {
-        return { ClientError::Network, status_out, esp_err_to_name(err) };
-    }
-
-    body_out = std::move(context.body);
-    const auto status_result = map_status(status_out);
-    if (!status_result.ok()) {
-        return status_result;
-    }
-    if (auto application_error = application_error_from_body(body_out, status_out)) {
-        return *application_error;
-    }
-    return {};
-}
-
-ClientResult perform_post_form(const std::string& url,
-                               const std::string& form_body,
-                               std::string& body_out,
-                               int& status_out)
-{
-    HttpBody context;
-    esp_http_client_config_t config {};
-    config.url = url.c_str();
-    config.method = HTTP_METHOD_POST;
-    config.event_handler = http_event_handler;
-    config.user_data = &context;
-    config.timeout_ms = 10000;
-    config.crt_bundle_attach = esp_crt_bundle_attach;
-    config.disable_auto_redirect = true;
-
-    esp_http_client_handle_t client = esp_http_client_init(&config);
-    if (!client) {
-        return { ClientError::Network, 0, "failed to initialize HTTP client" };
-    }
-
-    esp_http_client_set_header(client, "Accept", "application/json");
-    esp_http_client_set_header(client, "Content-Type", "application/x-www-form-urlencoded");
-    esp_http_client_set_post_field(client, form_body.c_str(), static_cast<int>(form_body.size()));
 
     const esp_err_t err = esp_http_client_perform(client);
     status_out = esp_http_client_get_status_code(client);
@@ -284,62 +240,7 @@ bool is_allowed_quote_socket_url(const std::string& url, const EndpointSet& endp
     return host_from_url(url) == host_from_url(endpoints.quote_ws_url);
 }
 
-bool parse_oauth_tokens(const std::string& body, auth::OAuthTokens& tokens_out)
-{
-    cJSON* root = cJSON_Parse(body.c_str());
-    if (!root) {
-        return false;
-    }
-
-    cJSON* data = cJSON_GetObjectItemCaseSensitive(root, "data");
-    cJSON* source = cJSON_IsObject(data) ? data : root;
-
-    const auto access = json_string(source, "access_token");
-    auto refresh = json_string(source, "refresh_token");
-    if (!refresh) {
-        refresh = json_string(source, "refreshToken");
-    }
-    if (!access || !refresh) {
-        cJSON_Delete(root);
-        return false;
-    }
-
-    tokens_out.access_token = *access;
-    tokens_out.refresh_token = *refresh;
-    const std::int64_t expires_at = json_int64(source, "expires_at");
-    const std::int64_t expires_in = json_int64(source, "expires_in");
-    if (expires_at > 0) {
-        tokens_out.expires_at_epoch_s = expires_at;
-    } else if (expires_in > 0) {
-        tokens_out.expires_at_epoch_s = static_cast<std::int64_t>(std::time(nullptr)) + expires_in;
-    }
-
-    cJSON_Delete(root);
-    return true;
-}
 #endif
-
-std::string token_exchange_form(const auth::OAuthConfig& oauth_config,
-                                const std::string& code,
-                                const std::string& code_verifier)
-{
-    std::ostringstream out;
-    out << "grant_type=authorization_code";
-    out << "&client_id=" << auth::url_encode(oauth_config.client_id);
-    out << "&code=" << auth::url_encode(code);
-    out << "&redirect_uri=" << auth::url_encode(oauth_config.redirect_uri);
-    out << "&code_verifier=" << auth::url_encode(code_verifier);
-    return out.str();
-}
-
-std::string refresh_form(const auth::OAuthConfig& oauth_config, const std::string& refresh_token)
-{
-    std::ostringstream out;
-    out << "grant_type=refresh_token";
-    out << "&client_id=" << auth::url_encode(oauth_config.client_id);
-    out << "&refresh_token=" << auth::url_encode(refresh_token);
-    return out.str();
-}
 
 } // namespace
 
@@ -370,7 +271,7 @@ ClientResult LongbridgeClient::fetch_socket_token(SocketToken& token_out)
     int status = 0;
     constexpr const char* path = "/v1/socket/token";
     const auto result =
-        perform_get(config_.endpoints.rest_base_url + path, path, config_.http_auth, body, status);
+        perform_get(config_.endpoints.rest_base_url + path, path, config_.api_key, body, status);
     if (!result.ok()) {
         return result;
     }
@@ -411,66 +312,6 @@ ClientResult LongbridgeClient::fetch_socket_token(SocketToken& token_out)
     token_out.socket_url = resolved_socket_url;
     token_out.expires_at_epoch_s = json_int64(source, "expires_at");
     cJSON_Delete(root);
-    return {};
-#endif
-}
-
-ClientResult LongbridgeClient::exchange_authorization_code(const auth::OAuthConfig& oauth_config,
-                                                           const std::string& code,
-                                                           const std::string& code_verifier,
-                                                           auth::OAuthTokens& tokens_out)
-{
-    emit_state("exchanging oauth code");
-
-#if defined(TAB5_HOST_TEST)
-    (void)oauth_config;
-    (void)code;
-    (void)code_verifier;
-    (void)tokens_out;
-    return { ClientError::UnsupportedCodec, 0, "ESP-IDF HTTP transport is not available in host tests" };
-#else
-    std::string body;
-    int status = 0;
-    const auto result =
-        perform_post_form(oauth_config.token_endpoint,
-                          token_exchange_form(oauth_config, code, code_verifier),
-                          body,
-                          status);
-    if (!result.ok()) {
-        return result;
-    }
-    if (!parse_oauth_tokens(body, tokens_out)) {
-        return { ClientError::Json, status, "OAuth token response did not contain tokens" };
-    }
-    return {};
-#endif
-}
-
-ClientResult LongbridgeClient::refresh_access_token(const auth::OAuthConfig& oauth_config,
-                                                    const std::string& refresh_token,
-                                                    auth::OAuthTokens& tokens_out)
-{
-    emit_state("refreshing oauth token");
-
-#if defined(TAB5_HOST_TEST)
-    (void)oauth_config;
-    (void)refresh_token;
-    (void)tokens_out;
-    return { ClientError::UnsupportedCodec, 0, "ESP-IDF HTTP transport is not available in host tests" };
-#else
-    std::string body;
-    int status = 0;
-    const auto result =
-        perform_post_form(oauth_config.token_endpoint,
-                          refresh_form(oauth_config, refresh_token),
-                          body,
-                          status);
-    if (!result.ok()) {
-        return result;
-    }
-    if (!parse_oauth_tokens(body, tokens_out)) {
-        return { ClientError::Json, status, "OAuth refresh response did not contain tokens" };
-    }
     return {};
 #endif
 }

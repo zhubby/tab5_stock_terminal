@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cstdlib>
 #include <optional>
 #include <sstream>
 #include <string_view>
@@ -39,26 +38,6 @@ std::string normalized_key(std::string input)
 bool starts_with(const std::string& value, char prefix)
 {
     return !value.empty() && value.front() == prefix;
-}
-
-bool bool_value(const std::string& value)
-{
-    const std::string normalized = lower(trim(value));
-    return normalized == "1" || normalized == "true" || normalized == "yes" || normalized == "on";
-}
-
-bool parse_i64(const std::string& value, std::int64_t& out)
-{
-    if (trim(value).empty()) {
-        return false;
-    }
-    char* end = nullptr;
-    const long long parsed = std::strtoll(value.c_str(), &end, 10);
-    if (!end || *end != '\0') {
-        return false;
-    }
-    out = static_cast<std::int64_t>(parsed);
-    return true;
 }
 
 std::optional<longbridge::EndpointRegion> parse_endpoint_region(const std::string& value)
@@ -106,6 +85,7 @@ void add_watchlist_values(quotes::Watchlist& watchlist,
 void apply_key_value(SettingsFileResult& result,
                      const std::string& key,
                      const std::string& value,
+                     bool legacy_oauth_mode,
                      bool& append_watchlist)
 {
     AppSettings& settings = result.settings;
@@ -118,42 +98,28 @@ void apply_key_value(SettingsFileResult& result,
     } else if (normalized == "endpoint" || normalized == "endpoint_region" || normalized == "longbridge_endpoint") {
         settings.endpoint_region = longbridge::endpoint_region_from_string(clean_value);
     } else if (normalized == "auth_mode" || normalized == "auth" || normalized == "longbridge_auth") {
-        settings.auth_mode = auth_mode_from_string(clean_value);
-    } else if (normalized == "client_id" || normalized == "longbridge_client_id") {
-        settings.longbridge_client_id = clean_value;
-    } else if (normalized == "redirect_uri" || normalized == "oauth_redirect_uri" || normalized == "callback_uri") {
-        if (!clean_value.empty()) {
-            settings.oauth_redirect_uri = clean_value;
-        }
-    } else if (normalized == "access_token" && settings.auth_mode == AuthMode::ApiKey) {
+        result.warnings.push_back("ignored legacy auth mode; only API token is supported: " + clean_value);
+    } else if (normalized == "client_id" || normalized == "longbridge_client_id"
+               || normalized == "redirect_uri" || normalized == "oauth_redirect_uri"
+               || normalized == "callback_uri" || normalized == "oauth_access_token"
+               || normalized == "refresh_token" || normalized == "oauth_refresh_token"
+               || normalized == "token_expires_at" || normalized == "expires_at"
+               || normalized == "oauth_expires_at" || normalized == "reset_tokens") {
+        result.warnings.push_back("ignored OAuth key: " + key);
+    } else if (normalized == "access_token" && legacy_oauth_mode) {
+        result.warnings.push_back("ignored legacy OAuth key: " + key);
+    } else if (normalized == "access_token") {
         result.touched_api_key_credentials = true;
         settings.api_key.access_token = clean_value;
-    } else if (normalized == "access_token" || normalized == "oauth_access_token") {
-        result.touched_oauth_tokens = true;
-        settings.oauth_tokens.access_token = clean_value;
-    } else if (normalized == "refresh_token" || normalized == "oauth_refresh_token") {
-        result.touched_oauth_tokens = true;
-        settings.oauth_tokens.refresh_token = clean_value;
-    } else if (normalized == "token_expires_at" || normalized == "expires_at" || normalized == "oauth_expires_at") {
-        result.touched_oauth_tokens = true;
-        std::int64_t expires_at = 0;
-        if (parse_i64(clean_value, expires_at)) {
-            settings.oauth_tokens.expires_at_epoch_s = expires_at;
-        } else {
-            result.warnings.push_back("ignored invalid token expiry: " + clean_value);
-        }
     } else if (normalized == "app_key" || normalized == "longbridge_app_key" || normalized == "api_app_key") {
         result.touched_api_key_credentials = true;
-        settings.auth_mode = AuthMode::ApiKey;
         settings.api_key.app_key = clean_value;
     } else if (normalized == "app_secret" || normalized == "longbridge_app_secret" || normalized == "api_app_secret") {
         result.touched_api_key_credentials = true;
-        settings.auth_mode = AuthMode::ApiKey;
         settings.api_key.app_secret = clean_value;
     } else if (normalized == "api_access_token" || normalized == "api_token"
                || normalized == "longbridge_access_token") {
         result.touched_api_key_credentials = true;
-        settings.auth_mode = AuthMode::ApiKey;
         settings.api_key.access_token = clean_value;
     } else if (normalized == "watchlist") {
         if (!append_watchlist) {
@@ -164,13 +130,37 @@ void apply_key_value(SettingsFileResult& result,
     } else if (normalized == "symbol") {
         append_watchlist = true;
         add_watchlist_symbol(settings.watchlist, clean_value, result.warnings);
-    } else if (normalized == "reset_tokens" && bool_value(clean_value)) {
-        result.touched_oauth_tokens = true;
-        result.reset_tokens = true;
-        settings.oauth_tokens = {};
     } else {
         result.warnings.push_back("ignored unknown key: " + key);
     }
+}
+
+bool has_legacy_oauth_mode(const std::string& content)
+{
+    std::istringstream stream(content);
+    std::string line;
+    while (std::getline(stream, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        const std::string clean = trim(line);
+        if (clean.empty() || starts_with(clean, '#') || starts_with(clean, ';')) {
+            continue;
+        }
+        if (starts_with(clean, '[') && clean.back() == ']') {
+            continue;
+        }
+        const auto equals = clean.find('=');
+        if (equals == std::string::npos) {
+            continue;
+        }
+        const std::string normalized = normalized_key(clean.substr(0, equals));
+        if (normalized == "auth_mode" || normalized == "auth" || normalized == "longbridge_auth") {
+            const std::string value = lower(trim(clean.substr(equals + 1)));
+            return value == "oauth" || value == "oauth2";
+        }
+    }
+    return false;
 }
 
 bool required_present(const AppSettings& settings)
@@ -178,10 +168,7 @@ bool required_present(const AppSettings& settings)
     if (!settings.wifi.complete() || settings.watchlist.empty()) {
         return false;
     }
-    if (settings.auth_mode == AuthMode::ApiKey) {
-        return settings.api_key.complete();
-    }
-    return !settings.longbridge_client_id.empty();
+    return settings.api_key.complete();
 }
 
 } // namespace
@@ -193,6 +180,7 @@ SettingsFileResult parse_settings_file(const std::string& content)
     bool saw_data = false;
     bool invalid_endpoint = false;
     bool append_watchlist = false;
+    const bool legacy_oauth_mode = has_legacy_oauth_mode(content);
 
     std::istringstream stream(content);
     std::string line;
@@ -218,14 +206,6 @@ SettingsFileResult parse_settings_file(const std::string& content)
         const std::string key = clean.substr(0, equals);
         const std::string normalized = normalized_key(key);
         const std::string value = trim(clean.substr(equals + 1));
-        if (normalized == "auth_mode" || normalized == "auth" || normalized == "longbridge_auth") {
-            const auto auth_mode = auth_mode_from_string(value);
-            if (lower(value) != "oauth" && auth_mode == AuthMode::OAuth) {
-                result.warnings.push_back("unknown auth mode; using oauth: " + value);
-            }
-            result.settings.auth_mode = auth_mode;
-            continue;
-        }
         if (normalized == "endpoint" || normalized == "endpoint_region" || normalized == "longbridge_endpoint") {
             const auto endpoint = parse_endpoint_region(value);
             if (!endpoint) {
@@ -236,7 +216,7 @@ SettingsFileResult parse_settings_file(const std::string& content)
             result.settings.endpoint_region = *endpoint;
             continue;
         }
-        apply_key_value(result, key, value, append_watchlist);
+        apply_key_value(result, key, value, legacy_oauth_mode, append_watchlist);
     }
 
     if (!saw_data) {
@@ -246,13 +226,6 @@ SettingsFileResult parse_settings_file(const std::string& content)
     if (invalid_endpoint) {
         result.status = SettingsFileStatus::InvalidEndpoint;
         return result;
-    }
-    if (result.settings.auth_mode == AuthMode::ApiKey && result.settings.api_key.access_token.empty()
-        && !result.settings.oauth_tokens.access_token.empty() && result.settings.oauth_tokens.refresh_token.empty()) {
-        result.settings.api_key.access_token = result.settings.oauth_tokens.access_token;
-        result.settings.oauth_tokens.access_token.clear();
-        result.touched_api_key_credentials = true;
-        result.touched_oauth_tokens = false;
     }
     if (result.settings.watchlist.empty()) {
         result.status = SettingsFileStatus::InvalidWatchlist;

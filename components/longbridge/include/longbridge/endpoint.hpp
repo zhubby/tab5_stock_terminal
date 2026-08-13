@@ -12,8 +12,6 @@ enum class EndpointRegion {
 struct EndpointSet {
     std::string rest_base_url;
     std::string quote_ws_url;
-    std::string authorize_url;
-    std::string token_url;
 };
 
 EndpointSet default_endpoints(EndpointRegion region);

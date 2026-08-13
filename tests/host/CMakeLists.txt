@@ -5,8 +5,6 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_executable(host_tests
-    ../../components/auth/oauth.cpp
-    ../../components/auth/oauth_callback_server.cpp
     ../../components/auth/sha256.cpp
     ../../components/longbridge/endpoint.cpp
     ../../components/longbridge/api_auth.cpp

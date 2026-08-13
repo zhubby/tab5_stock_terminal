@@ -11,16 +11,12 @@ EndpointSet default_endpoints(EndpointRegion region)
         return {
             "https://openapi.longbridge.cn",
             "wss://openapi-quote.longbridge.cn",
-            "https://openapi.longbridge.cn/oauth2/authorize",
-            "https://openapi.longbridge.cn/oauth2/token",
         };
     }
 
     return {
         "https://openapi.longbridge.com",
         "wss://openapi-quote.longbridge.com",
-        "https://openapi.longbridge.com/oauth2/authorize",
-        "https://openapi.longbridge.com/oauth2/token",
     };
 }
 

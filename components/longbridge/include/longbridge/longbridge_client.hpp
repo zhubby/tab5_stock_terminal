@@ -1,6 +1,5 @@
 #pragma once
 
-#include "auth/oauth.hpp"
 #include "longbridge/api_auth.hpp"
 #include "longbridge/endpoint.hpp"
 #include "longbridge/protocol.hpp"
@@ -51,8 +50,7 @@ using ClientStateCallback = std::function<void(const std::string&)>;
 
 struct ClientConfig {
     EndpointSet endpoints;
-    std::string access_token;
-    HttpAuthConfig http_auth;
+    ApiKeyCredentials api_key;
 };
 
 class LongbridgeClient {
@@ -64,13 +62,6 @@ public:
     void on_state(ClientStateCallback callback);
 
     ClientResult fetch_socket_token(SocketToken& token_out);
-    ClientResult exchange_authorization_code(const auth::OAuthConfig& oauth_config,
-                                             const std::string& code,
-                                             const std::string& code_verifier,
-                                             auth::OAuthTokens& tokens_out);
-    ClientResult refresh_access_token(const auth::OAuthConfig& oauth_config,
-                                      const std::string& refresh_token,
-                                      auth::OAuthTokens& tokens_out);
     ClientResult fetch_quote_snapshots(const std::vector<quotes::SecuritySymbol>& symbols,
                                        std::vector<quotes::QuoteSnapshot>& snapshots_out);
     ClientResult connect_quote_stream(const SocketToken& socket_token);

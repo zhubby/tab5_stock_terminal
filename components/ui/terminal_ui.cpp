@@ -25,7 +25,7 @@ constexpr std::uint32_t kError = 0xb42318;
 constexpr std::uint32_t kFocus = 0x00a3a3;
 constexpr std::size_t kSymbolInputMaxLength = 24;
 constexpr std::size_t kWifiInputMaxLength = 96;
-constexpr std::size_t kOAuthInputMaxLength = 256;
+constexpr std::size_t kCredentialInputMaxLength = 256;
 
 std::string money(const std::optional<double>& value)
 {
@@ -189,11 +189,6 @@ void TerminalUi::reset_content()
     ssid_input_label_ = nullptr;
     password_input_ = nullptr;
     password_input_label_ = nullptr;
-    auth_mode_dropdown_ = nullptr;
-    client_id_input_ = nullptr;
-    client_id_input_label_ = nullptr;
-    redirect_uri_input_ = nullptr;
-    redirect_uri_input_label_ = nullptr;
     api_app_key_input_ = nullptr;
     api_app_key_input_label_ = nullptr;
     api_app_secret_input_ = nullptr;
@@ -204,8 +199,6 @@ void TerminalUi::reset_content()
     input_text_.clear();
     ssid_input_text_.clear();
     password_input_text_.clear();
-    client_id_input_text_.clear();
-    redirect_uri_input_text_.clear();
     api_app_key_input_text_.clear();
     api_app_secret_input_text_.clear();
     api_access_token_input_text_.clear();
@@ -263,61 +256,24 @@ void TerminalUi::show_setup(const settings::AppSettings& settings)
     lv_obj_align(endpoint_dropdown_, LV_ALIGN_TOP_LEFT, 170, 130);
     add_focus(endpoint_dropdown_);
 
-    make_label(content_, "Auth mode", 390, 142);
-    auth_mode_dropdown_ = lv_dropdown_create(content_);
-    lv_dropdown_set_options(auth_mode_dropdown_, "OAuth\nAPI key");
-    lv_dropdown_set_selected(auth_mode_dropdown_, settings.auth_mode == settings::AuthMode::ApiKey ? 1 : 0);
-    lv_obj_set_size(auth_mode_dropdown_, 180, 40);
-    lv_obj_set_style_bg_color(auth_mode_dropdown_, color_hex(0xffffff), LV_PART_MAIN);
-    lv_obj_set_style_text_color(auth_mode_dropdown_, color_hex(kText), LV_PART_MAIN);
-    lv_obj_set_style_border_color(auth_mode_dropdown_, color_hex(kBorder), LV_PART_MAIN);
-    lv_obj_set_style_border_width(auth_mode_dropdown_, 1, LV_PART_MAIN);
-    lv_obj_set_style_radius(auth_mode_dropdown_, 3, LV_PART_MAIN);
-    lv_obj_align(auth_mode_dropdown_, LV_ALIGN_TOP_LEFT, 520, 130);
-    add_focus(auth_mode_dropdown_);
-
-    make_label(content_, "OAuth client_id", 4, 196);
-    create_input(content_,
-                 "OAuth client id",
-                 settings.longbridge_client_id,
-                 170,
-                 184,
-                 620,
-                 &client_id_input_,
-                 &client_id_input_label_,
-                 &client_id_input_text_);
-    add_focus(client_id_input_);
-
-    make_label(content_, "Callback URI", 4, 242);
-    create_input(content_,
-                 "http://tab5-stock.local/oauth/callback",
-                 settings.oauth_redirect_uri,
-                 170,
-                 230,
-                 760,
-                 &redirect_uri_input_,
-                 &redirect_uri_input_label_,
-                 &redirect_uri_input_text_);
-    add_focus(redirect_uri_input_);
-
-    make_label(content_, "API app_key", 4, 288);
+    make_label(content_, "API app_key", 4, 196);
     create_input(content_,
                  "Longbridge app_key",
                  settings.api_key.app_key,
                  170,
-                 276,
+                 184,
                  620,
                  &api_app_key_input_,
                  &api_app_key_input_label_,
                  &api_app_key_input_text_);
     add_focus(api_app_key_input_);
 
-    make_label(content_, "API app_secret", 4, 334);
+    make_label(content_, "API app_secret", 4, 242);
     create_input(content_,
                  "Longbridge app_secret",
                  settings.api_key.app_secret,
                  170,
-                 322,
+                 230,
                  620,
                  &api_app_secret_input_,
                  &api_app_secret_input_label_,
@@ -325,12 +281,12 @@ void TerminalUi::show_setup(const settings::AppSettings& settings)
                  true);
     add_focus(api_app_secret_input_);
 
-    make_label(content_, "API access_token", 4, 380);
+    make_label(content_, "API access_token", 4, 288);
     create_input(content_,
                  "Longbridge access_token",
                  settings.api_key.access_token,
                  170,
-                 368,
+                 276,
                  760,
                  &api_access_token_input_,
                  &api_access_token_input_label_,
@@ -338,7 +294,7 @@ void TerminalUi::show_setup(const settings::AppSettings& settings)
                  true);
     add_focus(api_access_token_input_);
 
-    lv_obj_t* save = make_button(content_, "Save", 170, 430);
+    lv_obj_t* save = make_button(content_, "Save", 170, 338);
     add_focus(save);
     lv_obj_add_event_cb(
         save,
@@ -349,20 +305,7 @@ void TerminalUi::show_setup(const settings::AppSettings& settings)
         LV_EVENT_CLICKED,
         this);
 
-    lv_obj_t* oauth = make_button(content_, "OAuth", 338, 430);
-    add_focus(oauth);
-    lv_obj_add_event_cb(
-        oauth,
-        [](lv_event_t* event) {
-            auto* self = static_cast<TerminalUi*>(lv_event_get_user_data(event));
-            if (self->callbacks_.start_oauth) {
-                self->callbacks_.start_oauth();
-            }
-        },
-        LV_EVENT_CLICKED,
-        this);
-
-    lv_obj_t* reset = make_button(content_, "Reset", 506, 430);
+    lv_obj_t* reset = make_button(content_, "Reset", 338, 338);
     add_focus(reset);
     lv_obj_add_event_cb(
         reset,
@@ -376,9 +319,8 @@ void TerminalUi::show_setup(const settings::AppSettings& settings)
         this);
 
     lv_obj_t* summary = lv_label_create(content_);
-    std::string text = "Auth: ";
-    text += settings.auth_mode == settings::AuthMode::ApiKey ? "API key " : "OAuth ";
-    text += settings.quote_auth_configured() ? "ready" : "not connected";
+    std::string text = "Auth: API key ";
+    text += settings.quote_auth_configured() ? "ready" : "not configured";
     text += "\nWatchlist: ";
     text += std::to_string(settings.watchlist.size());
     text += " symbols\nAPI key: ";
@@ -386,51 +328,11 @@ void TerminalUi::show_setup(const settings::AppSettings& settings)
     lv_label_set_text(summary, text.c_str());
     lv_obj_set_width(summary, 760);
     lv_obj_set_style_text_color(summary, color_hex(kMutedText), LV_PART_MAIN);
-    lv_obj_align(summary, LV_ALIGN_TOP_LEFT, 4, 488);
+    lv_obj_align(summary, LV_ALIGN_TOP_LEFT, 4, 396);
 
     if (ssid_input_) {
         lv_group_focus_obj(ssid_input_);
     }
-}
-
-void TerminalUi::show_oauth_url(const std::string& url)
-{
-    DisplayLock lock;
-    mode_ = UiMode::OAuth;
-    reset_content();
-    set_text(status_, "oauth");
-
-    lv_obj_t* heading = lv_label_create(content_);
-    lv_label_set_text(heading, "Longbridge OAuth");
-    lv_obj_set_style_text_font(heading, &lv_font_montserrat_18, LV_PART_MAIN);
-    lv_obj_set_style_text_color(heading, color_hex(kText), LV_PART_MAIN);
-    lv_obj_align(heading, LV_ALIGN_TOP_LEFT, 4, 4);
-
-    lv_obj_t* instructions = lv_label_create(content_);
-    lv_label_set_text(instructions, "Scan the QR code or open the URL to authorize this Tab5.");
-    lv_obj_set_style_text_color(instructions, color_hex(kMutedText), LV_PART_MAIN);
-    lv_obj_align(instructions, LV_ALIGN_TOP_LEFT, 4, 42);
-
-#if defined(LV_USE_QRCODE) && LV_USE_QRCODE
-#if defined(LVGL_VERSION_MAJOR) && LVGL_VERSION_MAJOR >= 9
-    lv_obj_t* qr = lv_qrcode_create(content_);
-    lv_qrcode_set_size(qr, 220);
-    lv_qrcode_set_dark_color(qr, lv_color_black());
-    lv_qrcode_set_light_color(qr, lv_color_white());
-    lv_qrcode_update(qr, url.c_str(), url.size());
-#else
-    lv_obj_t* qr = lv_qrcode_create(content_, 220, lv_color_black(), lv_color_white());
-    lv_qrcode_update(qr, url.c_str(), url.size());
-#endif
-    lv_obj_align(qr, LV_ALIGN_TOP_LEFT, 4, 82);
-#endif
-
-    lv_obj_t* url_label = lv_label_create(content_);
-    lv_label_set_long_mode(url_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(url_label, 940);
-    lv_label_set_text(url_label, url.c_str());
-    lv_obj_set_style_text_color(url_label, color_hex(kText), LV_PART_MAIN);
-    lv_obj_align(url_label, LV_ALIGN_TOP_LEFT, 280, 92);
 }
 
 void TerminalUi::show_watchlist(const std::vector<quotes::QuoteSnapshot>& rows)
@@ -552,21 +454,7 @@ void TerminalUi::build_watchlist_table(const std::vector<quotes::QuoteSnapshot>&
         LV_EVENT_CLICKED,
         this);
 
-    lv_obj_t* oauth = make_button(detail_, "OAuth", 12, 512);
-    lv_obj_set_size(oauth, 138, 36);
-    add_focus(oauth);
-    lv_obj_add_event_cb(
-        oauth,
-        [](lv_event_t* event) {
-            auto* self = static_cast<TerminalUi*>(lv_event_get_user_data(event));
-            if (self->callbacks_.start_oauth) {
-                self->callbacks_.start_oauth();
-            }
-        },
-        LV_EVENT_CLICKED,
-        this);
-
-    lv_obj_t* reset = make_button(detail_, "Reset", 168, 512);
+    lv_obj_t* reset = make_button(detail_, "Reset", 12, 512);
     lv_obj_set_size(reset, 138, 36);
     add_focus(reset);
     lv_obj_add_event_cb(
@@ -824,12 +712,6 @@ std::string* TerminalUi::input_text_for(lv_obj_t* object)
     if (object == password_input_) {
         return &password_input_text_;
     }
-    if (object == client_id_input_) {
-        return &client_id_input_text_;
-    }
-    if (object == redirect_uri_input_) {
-        return &redirect_uri_input_text_;
-    }
     if (object == api_app_key_input_) {
         return &api_app_key_input_text_;
     }
@@ -853,12 +735,6 @@ lv_obj_t* TerminalUi::input_label_for(lv_obj_t* object) const
     if (object == password_input_) {
         return password_input_label_;
     }
-    if (object == client_id_input_) {
-        return client_id_input_label_;
-    }
-    if (object == redirect_uri_input_) {
-        return redirect_uri_input_label_;
-    }
     if (object == api_app_key_input_) {
         return api_app_key_input_label_;
     }
@@ -881,12 +757,6 @@ const char* TerminalUi::input_placeholder_for(lv_obj_t* object) const
     }
     if (object == password_input_) {
         return "password";
-    }
-    if (object == client_id_input_) {
-        return "OAuth client id";
-    }
-    if (object == redirect_uri_input_) {
-        return "http://tab5-stock.local/oauth/callback";
     }
     if (object == api_app_key_input_) {
         return "Longbridge app_key";
@@ -913,13 +783,12 @@ std::size_t TerminalUi::input_max_length_for(lv_obj_t* object) const
     if (object == ssid_input_ || object == password_input_) {
         return kWifiInputMaxLength;
     }
-    return kOAuthInputMaxLength;
+    return kCredentialInputMaxLength;
 }
 
 void TerminalUi::save_setup_from_controls()
 {
-    if (!callbacks_.save_setup || !ssid_input_ || !password_input_ || !client_id_input_
-        || !redirect_uri_input_ || !endpoint_dropdown_ || !auth_mode_dropdown_) {
+    if (!callbacks_.save_setup || !ssid_input_ || !password_input_ || !endpoint_dropdown_) {
         return;
     }
 
@@ -930,9 +799,6 @@ void TerminalUi::save_setup_from_controls()
     const auto endpoint = lv_dropdown_get_selected(endpoint_dropdown_) == 1
         ? longbridge::EndpointRegion::MainlandChina
         : longbridge::EndpointRegion::Global;
-    const auto auth_mode = lv_dropdown_get_selected(auth_mode_dropdown_) == 1
-        ? settings::AuthMode::ApiKey
-        : settings::AuthMode::OAuth;
 
     settings::LongbridgeApiKeyCredentials api_key {
         api_app_key_input_text_,
@@ -940,7 +806,7 @@ void TerminalUi::save_setup_from_controls()
         api_access_token_input_text_,
     };
 
-    callbacks_.save_setup(wifi, endpoint, auth_mode, client_id_input_text_, redirect_uri_input_text_, api_key);
+    callbacks_.save_setup(wifi, endpoint, api_key);
 }
 
 void TerminalUi::add_symbol_from_input()

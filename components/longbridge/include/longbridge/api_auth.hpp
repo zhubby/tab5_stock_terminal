@@ -17,17 +17,6 @@ struct ApiKeyCredentials {
     }
 };
 
-enum class HttpAuthMode {
-    OAuth,
-    ApiKey,
-};
-
-struct HttpAuthConfig {
-    HttpAuthMode mode { HttpAuthMode::OAuth };
-    std::string oauth_access_token;
-    ApiKeyCredentials api_key;
-};
-
 struct HttpHeader {
     std::string name;
     std::string value;
@@ -35,7 +24,7 @@ struct HttpHeader {
 
 std::string strip_bearer_prefix(const std::string& credential);
 std::string dc_region_from_credentials(const std::vector<std::string>& credentials);
-std::vector<HttpHeader> build_longbridge_auth_headers(const HttpAuthConfig& auth,
+std::vector<HttpHeader> build_longbridge_auth_headers(const ApiKeyCredentials& credentials,
                                                       const std::string& method,
                                                       const std::string& path,
                                                       const std::string& query,
