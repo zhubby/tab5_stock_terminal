@@ -94,6 +94,21 @@ If the SD card config does not include OAuth tokens, previously stored NVS token
 
 After saving setup, press OAuth to display the authorization URL/QR. The firmware starts a local callback server on port 80 at `/oauth/callback`, validates the OAuth `state`, exchanges the authorization code with PKCE, and stores the returned access and refresh tokens in NVS.
 
+After Wi-Fi connects, the firmware also starts a local SD card file manager at `http://tab5-stock.local:8080/`. It exposes the Tab5 microSD card mounted at `/sdcard` for LAN browsing, text editing, new file/folder creation, downloads, and deletion. The service generates a random access token on each start; the device status line shows that the service is running, and the serial log prints the full `?token=...` URL. Text editing and scripted uploads are limited to files up to 256 KB; larger files can still be downloaded from the listing.
+
+For scripted access, use:
+
+```bash
+TOKEN=the-token-shown-in-the-tab5-log
+curl -H "X-Tab5-SD-Token: $TOKEN" http://tab5-stock.local:8080/TAB5.CFG
+curl -X PUT -H "X-Tab5-SD-Token: $TOKEN" --data-binary @local.txt \
+  'http://tab5-stock.local:8080/api/file?path=/notes/local.txt'
+curl -X DELETE -H "X-Tab5-SD-Token: $TOKEN" \
+  'http://tab5-stock.local:8080/api/file?path=/notes/local.txt'
+```
+
+`PUT /api/file?path=/absolute/sd/path` creates or replaces one file. `GET /path` views a directory in the browser or downloads a file. `DELETE /api/file?path=/absolute/sd/path` removes a file or empty folder. Paths must be absolute, URL-encoded UTF-8 paths under `/sdcard`; traversal and FAT-invalid characters are rejected. Folder creation is available from the browser UI.
+
 In API Key mode, quote startup skips OAuth entirely. The firmware signs the `/v1/socket/token` request with the Longbridge SDK-compatible HMAC-SHA256 headers: `authorization`, `x-api-key`, `x-dc-region`, `x-timestamp`, and `x-api-signature`.
 
 If Longbridge rejects the LAN callback URI policy for your app, use a temporary callback helper only for authorization-code capture. Quote traffic must remain direct from Tab5 to Longbridge.
@@ -123,6 +138,7 @@ The watchlist caps at 500 symbols to stay aligned with Longbridge quote subscrip
 
 - Never commit access tokens, refresh tokens, Wi-Fi passwords, App Secrets, or generated `sdkconfig` files.
 - Treat SD card config files as credentials when they include Wi-Fi passwords, OAuth tokens, API access tokens, or App Secrets.
+- The SD card web file manager uses a per-start token, but it is still a plain HTTP LAN tool. Use it only on trusted networks and turn off Wi-Fi or remove the SD card when exposing sensitive files.
 - OAuth PKCE avoids embedding App Secrets in firmware. API Key mode is supported for local/private devices, but stores `app_secret` on-device.
 - NVS encryption is not enabled by default because the HMAC-backed ESP-IDF scheme can permanently burn an eFuse key on first boot. Enable it deliberately with `idf.py menuconfig` only after choosing the desired key-protection policy for your hardware.
 - The v1 scope is read-only quote data. It intentionally excludes accounts, positions, orders, and trading.
@@ -130,7 +146,7 @@ The watchlist caps at 500 symbols to stay aligned with Longbridge quote subscrip
 
 ## Tests
 
-Portable host tests cover symbol normalization, watchlist behavior, SD card settings-file parsing, API Key signing, quote merge semantics, PKCE, OAuth callback parsing, protocol frame boundaries, socket quote-pull protobuf fixtures, push quote protobuf fixtures, and reconnect backoff:
+Portable host tests cover symbol normalization, watchlist behavior, SD card settings-file parsing, SD web file-manager path safety helpers, API Key signing, quote merge semantics, PKCE, OAuth callback parsing, protocol frame boundaries, socket quote-pull protobuf fixtures, push quote protobuf fixtures, and reconnect backoff:
 
 ```bash
 cmake -S tests/host -B build/host-tests

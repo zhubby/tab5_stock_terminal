@@ -2,6 +2,7 @@
 #include "auth/oauth_callback_server.hpp"
 #include "longbridge/longbridge_client.hpp"
 #include "quotes/quote_store.hpp"
+#include "sd_file_manager/sd_file_manager.hpp"
 #include "settings/settings_file.hpp"
 #include "settings/settings_store.hpp"
 #include "ui/terminal_ui.hpp"
@@ -136,6 +137,7 @@ tab5::quotes::QuoteStore g_quote_store;
 tab5::ui::TerminalUi g_ui;
 tab5::longbridge::LongbridgeClient g_longbridge;
 tab5::auth::OAuthCallbackServer g_oauth_callback_server;
+tab5::sd_file_manager::SdFileManagerServer g_sd_file_manager_server;
 tab5::auth::PkcePair g_pkce;
 std::string g_oauth_state;
 EventGroupHandle_t g_wifi_events { nullptr };
@@ -176,6 +178,8 @@ bool g_wifi_online { false };
 bool g_quote_stream_online { false };
 std::string g_boot_warning;
 std::string g_connection_status { "offline" };
+std::string g_sd_file_manager_status;
+bool g_sd_file_manager_mdns_advertised { false };
 std::atomic<KeyboardStatus> g_keyboard_status { KeyboardStatus::Wait };
 std::string g_rendered_status;
 
@@ -200,6 +204,10 @@ void refresh_status_line()
     default:
         status += "kbd wait";
         break;
+    }
+    if (!g_sd_file_manager_status.empty()) {
+        status += " | ";
+        status += g_sd_file_manager_status;
     }
     if (g_rendered_status == status) {
         return;
@@ -1356,6 +1364,43 @@ void start_mdns()
     g_mdns_started = true;
 }
 
+void advertise_sd_file_manager_mdns()
+{
+    if (!g_mdns_started || !g_sd_file_manager_server.running() || g_sd_file_manager_mdns_advertised) {
+        return;
+    }
+
+    const esp_err_t err = mdns_service_add("Tab5 SD Files",
+                                           "_http",
+                                           "_tcp",
+                                           g_sd_file_manager_server.port(),
+                                           nullptr,
+                                           0);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(kTag, "SD web mDNS service registration failed: %s", esp_err_to_name(err));
+        return;
+    }
+    g_sd_file_manager_mdns_advertised = true;
+}
+
+void start_sd_file_manager_once()
+{
+    if (g_sd_file_manager_server.running()) {
+        advertise_sd_file_manager_mdns();
+        return;
+    }
+    g_sd_file_manager_server.on_status([](const std::string& status) {
+        g_sd_file_manager_status = status;
+        refresh_status_line();
+    });
+    if (!g_sd_file_manager_server.start()) {
+        ESP_LOGW(kTag, "SD web file manager failed to start");
+        return;
+    }
+
+    advertise_sd_file_manager_mdns();
+}
+
 void start_sntp_once()
 {
     if (g_sntp_started) {
@@ -1467,6 +1512,7 @@ bool start_wifi_sta(const tab5::settings::WifiCredentials& wifi)
     g_wifi_online = true;
     g_wifi_backoff.reset();
     g_next_wifi_reconnect_ms = 0;
+    start_sd_file_manager_once();
     if (!wait_for_time_sync()) {
         ESP_LOGW(kTag, "SNTP time sync did not complete before timeout");
     }
@@ -2617,6 +2663,7 @@ void handle_wifi_state(std::int64_t now_ms)
             g_next_wifi_reconnect_ms = 0;
             g_next_quote_refresh_ms = 0;
             set_connection_status("wifi connected");
+            start_sd_file_manager_once();
         }
         return;
     }

@@ -6,6 +6,7 @@
 #include "longbridge/quote_codec.hpp"
 #include "quotes/quote_store.hpp"
 #include "quotes/symbol.hpp"
+#include "sd_file_manager/sd_file_manager.hpp"
 #include "settings/settings_file.hpp"
 
 #include <cassert>
@@ -146,6 +147,75 @@ watchlist=AAPL.US
 )CONF");
     expect(incomplete_api_key.status == settings::SettingsFileStatus::MissingRequired,
            "settings file rejects incomplete API key credentials");
+}
+
+void test_sd_file_manager_helpers()
+{
+    auto root = sd_file_manager::normalize_request_path("/");
+    expect(root.ok(), "SD file manager accepts root path");
+    expect(root.relative_path == "/", "SD file manager normalizes root path");
+
+    auto collapsed = sd_file_manager::normalize_request_path("/配置//目录/./测试.txt");
+    expect(collapsed.ok(), "SD file manager accepts UTF-8 long filename paths");
+    expect(collapsed.relative_path == "/配置/目录/测试.txt",
+           "SD file manager collapses duplicate and dot path segments");
+
+    auto encoded = sd_file_manager::url_encode("/配置/测试 文件.txt");
+    expect(encoded == "/%E9%85%8D%E7%BD%AE/%E6%B5%8B%E8%AF%95%20%E6%96%87%E4%BB%B6.txt",
+           "SD file manager URL encodes UTF-8 paths");
+    auto decoded = sd_file_manager::url_decode(encoded);
+    expect(decoded.has_value() && *decoded == "/配置/测试 文件.txt",
+           "SD file manager URL decodes UTF-8 paths");
+
+    auto literal_plus = sd_file_manager::url_decode("/A+B.txt", false);
+    expect(literal_plus.has_value() && *literal_plus == "/A+B.txt",
+           "SD file manager keeps literal plus in URI paths");
+    auto form_plus = sd_file_manager::url_decode("A+B.txt");
+    expect(form_plus.has_value() && *form_plus == "A B.txt",
+           "SD file manager maps form plus to space");
+
+    auto traversal = sd_file_manager::normalize_request_path("/safe/../secret.txt");
+    expect(!traversal.ok() && traversal.error == sd_file_manager::PathError::Traversal,
+           "SD file manager rejects parent traversal");
+    auto relative = sd_file_manager::normalize_request_path("safe.txt");
+    expect(!relative.ok() && relative.error == sd_file_manager::PathError::NotAbsolute,
+           "SD file manager rejects relative paths");
+    auto control = sd_file_manager::normalize_request_path(std::string("/bad/\x01.txt", 7));
+    expect(!control.ok() && control.error == sd_file_manager::PathError::InvalidCharacter,
+           "SD file manager rejects control characters");
+    auto backslash = sd_file_manager::normalize_request_path("/safe/..\\secret.txt");
+    expect(!backslash.ok() && backslash.error == sd_file_manager::PathError::InvalidCharacter,
+           "SD file manager rejects FAT path separators in file names");
+    auto colon = sd_file_manager::normalize_request_path("/safe/C:secret.txt");
+    expect(!colon.ok() && colon.error == sd_file_manager::PathError::InvalidCharacter,
+           "SD file manager rejects FAT drive separators in file names");
+
+    expect(sd_file_manager::parent_path("/配置/目录/测试.txt") == "/配置/目录",
+           "SD file manager computes parent path");
+    expect(sd_file_manager::parent_path("/测试.txt") == "/",
+           "SD file manager parent of root child is root");
+    expect(sd_file_manager::basename("/配置/目录/测试.txt") == "测试.txt",
+           "SD file manager computes basename");
+    expect(sd_file_manager::html_escape("<a&b\"c'>") == "&lt;a&amp;b&quot;c&#39;&gt;",
+           "SD file manager escapes HTML");
+
+    auto has_route = [](const char* uri, sd_file_manager::RouteMethod method) {
+        for (std::size_t i = 0; i < sd_file_manager::route_spec_count(); ++i) {
+            const auto spec = sd_file_manager::route_spec_at(i);
+            if (std::string(spec.uri) == uri && spec.method == method) {
+                return true;
+            }
+        }
+        return false;
+    };
+    expect(sd_file_manager::route_spec_count() == 8,
+           "SD file manager registers every HTTP route");
+    expect(has_route("/delete", sd_file_manager::RouteMethod::Post),
+           "SD file manager registers browser delete form route");
+    expect(has_route("/api/file", sd_file_manager::RouteMethod::Put),
+           "SD file manager registers script file upload route");
+    expect(has_route("/api/file", sd_file_manager::RouteMethod::Delete),
+           "SD file manager registers script file delete route");
 }
 
 void test_api_key_auth_headers()
@@ -509,6 +579,7 @@ int main()
     test_symbol_normalization();
     test_watchlist();
     test_settings_file();
+    test_sd_file_manager_helpers();
     test_api_key_auth_headers();
     test_quote_store();
     test_oauth_pkce();
